@@ -1,0 +1,47 @@
+{
+    "python.defaultInterpreterPath": ".venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+        }
+    },
+
+    "ruff.organizeImports": true,
+    "ruff.fixAll": true,
+
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    "jupyter.interactiveWindow.creationMode": "perFile",
+
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.pytest_cache": true,
+        "**/.ruff_cache": true,
+        "**/.mypy_cache": true,
+        "**/*.egg-info": true
+    },
+
+    "search.exclude": {
+        "data/**": true,
+        "dbt/target/**": true,
+        "dbt/dbt_packages/**": true,
+        "**/.venv/**": true
+    },
+
+    "[sql]": {
+        "editor.defaultFormatter": "mtxr.sqltools"
+    },
+
+    "[sql-bigquery]": {
+        "editor.defaultFormatter": "innoverio.vscode-dbt-power-user"
+    },
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}

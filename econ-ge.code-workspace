@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": ".", "name": "Root"
+		},
+	],
+	"settings": {
+		"ruff.organizeImports": true,
+		"ruff.fixAll": true
+	}
+}
