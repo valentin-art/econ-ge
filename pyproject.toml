@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.33.1",
     "structlog>=24.0",
+    "types-requests>=2.33.0.20260518",
 ]
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy", "ipykernel", "jupyterlab"]
