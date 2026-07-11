@@ -3,7 +3,7 @@
 # This script waits until Docker Desktop is ready in WSL
 
 # Optional: timeout in seconds
-TIMEOUT=30
+TIMEOUT=120
 INTERVAL=2
 ELAPSED=0
 

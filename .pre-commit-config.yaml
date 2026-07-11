@@ -33,11 +33,11 @@ repos:
       - id: sqlfluff-fix
         files: ^dbt/models/
 
-#  - repo: https://github.com/Yelp/detect-secrets
-#    rev: v1.5.0
-#    hooks:
-#      - id: detect-secrets
-#        args: ['--baseline', '.secrets.baseline']
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
 
   - repo: https://github.com/kynan/nbstripout
     rev: 0.7.1
