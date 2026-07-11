@@ -216,3 +216,4 @@ __marimo__/
 
 data/
 src/parsers/dictionaries/
+.claude/
