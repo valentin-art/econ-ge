@@ -54,7 +54,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.io.parquet import write_parquet
+from src.input_output.parquet import write_parquet
 from src.schemas.bronze.cps_mw_long import validate_cps_mw_long
 
 DICTIONARIES_DIR = Path(__file__).resolve().parent / "dictionaries" / "cpsmw"

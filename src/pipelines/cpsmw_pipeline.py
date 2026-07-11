@@ -20,7 +20,7 @@ import structlog
 from src.config import sources
 from src.config.settings import settings
 from src.extractors.cps_mw import CPSMWExtractor
-from src.io.parquet import read_parquet
+from src.input_output.parquet import read_parquet
 from src.parsers.cps_mw import build_and_save_variable_dictionary, parse_to_bronze
 
 log = structlog.get_logger(__name__)

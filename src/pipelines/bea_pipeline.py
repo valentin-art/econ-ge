@@ -50,7 +50,7 @@ from src.features.bea.rental_prices import (
     compute_rental_prices,
     rental_shares,
 )
-from src.io.parquet import read_parquet
+from src.input_output.parquet import read_parquet
 from src.parsers.asset_dim import build_asset_dim
 from src.parsers.bea_bronze import parse_to_bronze
 from src.parsers.wide import to_wide
