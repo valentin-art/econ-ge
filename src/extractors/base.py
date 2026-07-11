@@ -12,6 +12,7 @@ import hashlib
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -30,7 +31,7 @@ class ExtractionRecord(BaseModel):
 
 class Extractor(ABC):
     @abstractmethod
-    def extract(self, **params) -> ExtractionRecord: ...
+    def extract(self, *args: Any, **kwargs: Any) -> ExtractionRecord: ...
 
 
 def build_extraction_record(
