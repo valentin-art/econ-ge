@@ -18,6 +18,11 @@
 				"database": "appdb",
 				"username": "econga"
 			}
-		]
+		],
+		"python.terminal.useEnvFile": true
+	},
+	"launch": {
+		"version": "0.2.0",
+		"configurations": []
 	}
 }
