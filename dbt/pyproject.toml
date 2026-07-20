@@ -1,0 +1,13 @@
+[project]
+name = "econ-ge-dbt"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "dbt-core>=1.9",
+    "dbt-postgres>=1.9",
+    "dagster>=1.13.14",
+    "dagster-dbt>=0.29.14",
+]
+
+[tool.uv]
+package = false

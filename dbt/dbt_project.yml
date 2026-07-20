@@ -1,0 +1,35 @@
+name: 'econ_ge'
+version: '0.1.0'
+profile: 'econ_ge'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+require-dbt-version: ">=1.9.0"
+
+models:
+  econ_ge:
+    +persist_docs:
+      relation: true
+      columns: true
+
+    staging:
+      +materialized: view
+      +schema: staging
+
+    marts:
+      +materialized: table
+      +schema: marts
+      economy:
+        +tags: ['domain:economy']
+
+tests:
+  +severity: warn
+  econ_ge:
+    staging:
+      +severity: error
