@@ -1,0 +1,20 @@
+load_from:
+  # BEA extract/bronze/silver/postgres-load assets -- orchestration/'s own venv
+  # (keeps dagster's own heavy deps out of the root project's env; imports the
+  # root project's src.* code via an editable path dependency, see
+  # orchestration/pyproject.toml).
+  - python_module:
+      module_name: orchestration.definitions
+      attribute: defs
+      working_directory: .
+      executable_path: orchestration/.venv/bin/python
+      location_name: bea_python
+
+  # dbt models/tests as assets -- dbt/'s own venv (Python 3.10; dbt-core's
+  # mashumaro pin does not import under the root project's Python 3.14).
+  - python_module:
+      module_name: dagster_defs
+      attribute: defs
+      working_directory: dbt
+      executable_path: dbt/.venv/bin/python
+      location_name: bea_dbt
