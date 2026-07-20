@@ -1,0 +1,15 @@
+[project]
+name = "econ-ge-orchestration"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster>=1.13.14",
+    "dagster-webserver>=1.13.14",
+    "econ-model",
+]
+
+[tool.uv.sources]
+econ-model = { path = "..", editable = true }
+
+[tool.uv]
+package = false
