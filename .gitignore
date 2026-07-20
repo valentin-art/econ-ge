@@ -218,6 +218,10 @@ data/
 src/parsers/dictionaries/
 .claude/
 
+.dagster_home/
+dbt/dbt_packages/
+dbt/.user.yml
+dbt/package-lock.concurrent-update-lock
 .env
 .env.*
 !secrets.enc.env
