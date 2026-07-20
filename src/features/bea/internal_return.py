@@ -27,7 +27,7 @@ def solve_r_t(
 
     Identity (nonresidential private assets):
 
-        NOS_t = Σ_j ( r_t − pi_bar_{j,t} ) · V_{j,t}
+        NOS_t = sum_j ( r_t - pi_bar_{j,t} ) · V_{j,t}
 
     NOS already has CFC subtracted by BEA, so delta does not appear on the RHS.
     Using the GOS form (+ delta_j) with NOS on the LHS double-counts CFC and
@@ -40,8 +40,8 @@ def solve_r_t(
     Parameters
     ----------
     df_nos    : NOS series (Year index), millions USD - use T11600 primary
-    Pi_smooth : smoothed capital-gains rates pi_bar_{j,t} (LineNumber × Year)
-    W_stock   : current-cost net stock V_{j,t} (LineNumber × Year)
+    Pi_smooth : smoothed capital-gains rates pi_bar_{j,t} (LineNumber X Year)
+    W_stock   : current-cost net stock V_{j,t} (LineNumber X Year)
     delta     : geometric depreciation rates delta_j (LineNumber index)
 
     Returns

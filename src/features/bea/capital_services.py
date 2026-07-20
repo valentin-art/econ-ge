@@ -12,7 +12,7 @@ def tornqvist_index(
     """Discrete-time Divisia (Tornqvist) capital services index K^s_t.
 
     Growth rate:
-        d ln K^s_t = Σ_j omega_bar_{j,t} * d ln K^N_{j,t}
+        d ln K^s_t = sum_j omega_bar_{j,t} * d ln K^N_{j,t}
     where omega_bar_{j,t} = 0.5 * (omega_{j,t} + omega_{j,t-1}).
 
     Rental-weighted aggregation gives capital *services* (the productive
@@ -70,7 +70,7 @@ def effective_depreciation(
 ) -> pd.Series:
     """Rental-share-weighted effective depreciation rate delta^s_t.
 
-    delta^s_t = Σ_{j in s} omega_{j,t} * delta_j
+    delta^s_t = sum_{j in s} omega_{j,t} * delta_j
 
     Time-varying because within-bucket composition shifts over time
     (e.g. software's growing share of IT capital raises delta^IT_t even
