@@ -6,6 +6,8 @@ cache hit: BEA revises published tables between vintages, so silently
 reusing a stale file would be worse than the extra network call.
 """
 
+import time
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +25,30 @@ from src.extractors.bea_json import read_bea_results
 from src.extractors.manifest import append_to_manifest
 
 log = structlog.get_logger(__name__)
+
+# BEA's NIPA backend intermittently 503s on otherwise-valid requests (observed:
+# identical request succeeds seconds later, unrelated to request shape) --
+# beaapi's own throttle=True only backs off for HTTP 429, not generic 5xx.
+_RETRYABLE_STATUS_CODES = {502, 503, 504}
+_MAX_ATTEMPTS = 4
+_RETRY_SLEEP_SECONDS = 5
+
+
+def _api_request_with_retry(beaspec: dict) -> str:
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            return beaapi.api_request(beaspec, as_string=True, throttle=True)  # type: ignore
+        except urllib.error.HTTPError as e:
+            if e.code not in _RETRYABLE_STATUS_CODES or attempt == _MAX_ATTEMPTS:
+                raise
+            log.warning(
+                "bea_extract_retry",
+                status_code=e.code,
+                attempt=attempt,
+                max_attempts=_MAX_ATTEMPTS,
+            )
+            time.sleep(_RETRY_SLEEP_SECONDS)
+    raise RuntimeError("unreachable")
 
 
 def _find_release_date(notes: list[dict] | None, table: str) -> str | None:
@@ -69,7 +95,7 @@ class BEAExtractor(Extractor):
             "ResultFormat": "json",
             **frequency_kwargs,
         }
-        raw_json = beaapi.api_request(beaspec, as_string=True, throttle=True)
+        raw_json = _api_request_with_retry(beaspec)
 
         file_path = self.storage_dir / dataset / f"{table}.json"
         file_path.parent.mkdir(parents=True, exist_ok=True)
