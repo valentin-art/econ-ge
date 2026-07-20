@@ -20,8 +20,8 @@ def tornqvist_index(
 
     Parameters
     ----------
-    K_df     : real net stock (LineNumber × Year) - asset subset for this bucket
-    omega_df : rental shares within bucket (LineNumber × Year)
+    K_df     : real net stock (LineNumber X Year) - asset subset for this bucket
+    omega_df : rental shares within bucket (LineNumber X Year)
     ref_year : level anchor; index value = 1.0 in ref_year
 
     Returns
@@ -79,7 +79,7 @@ def effective_depreciation(
 
     Parameters
     ----------
-    omega_df     : rental shares for the bucket (LineNumber × Year)
+    omega_df     : rental shares for the bucket (LineNumber X Year)
     delta_bucket : depreciation rates delta_j for assets in this bucket
     """
     return omega_df.mul(delta_bucket, axis=0).sum(axis=0)
