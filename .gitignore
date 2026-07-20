@@ -222,3 +222,12 @@ src/parsers/dictionaries/
 .env.*
 !secrets.enc.env
 .sops.*
+
+# dbt
+dbt/profiles.yml
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# dagster
+.dagster_home/

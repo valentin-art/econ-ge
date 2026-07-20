@@ -17,6 +17,16 @@
 				"name": "econbd",
 				"database": "appdb",
 				"username": "econga"
+			},
+			{
+				"ssh": "Disabled",
+				"previewLimit": 50,
+				"server": "localhost",
+				"port": 5432,
+				"driver": "PostgreSQL",
+				"name": "econga",
+				"database": "appdb",
+				"username": "econga"
 			}
 		],
 		"python.terminal.useEnvFile": true
