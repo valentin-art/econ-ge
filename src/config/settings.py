@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     cps_mw_base_url: str = Field(
         default="https://data.nber.org/mare_winship", alias="CPS_MW_BASE_URL"
     )
+    postgres_user: str = Field(default="", alias="POSTGRES_USER")
+    postgres_password: str = Field(default="", alias="POSTGRES_PASSWORD")
+    postgres_db: str = Field(default="", alias="POSTGRES_DB")
+    postgres_host_port: int = Field(default=5432, alias="POSTGRES_HOST_PORT")
+
+    @property
+    def postgres_connection_params(self) -> dict:
+        return {
+            "host": "localhost",
+            "port": self.postgres_host_port,
+            "dbname": self.postgres_db,
+            "user": self.postgres_user,
+            "password": self.postgres_password,
+        }
 
 
 settings = Settings()

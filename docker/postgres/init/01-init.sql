@@ -37,4 +37,5 @@ CREATE TABLE IF NOT EXISTS silver.bea_nipa (
     y_real_idx REAL,
     p_output REAL,
     pi_output REAL,
+    loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -73,6 +73,22 @@ VA_TABLE_PRICE = "T10304"
 # verified: Line 3 = "Nonfarm" (business)
 VA_LINE_NONFARM = 3
 
+# (dataset, table) pairs pulled by the BEA extract/parse pipeline stages
+# (pipelines.bea_extract_pipeline, pipelines.bea_parse_pipeline) and by the
+# fused pipelines.bea_pipeline.run_capital_pipeline — single source of truth
+# so the two never drift apart. VA_TABLE_PRICE (T10304) is not pulled: no
+# pipeline currently reads it.
+BEA_TABLES: list[tuple[str, str]] = [
+    ("FixedAssets", FA_TABLE_21),
+    ("FixedAssets", FA_TABLE_24),
+    ("FixedAssets", FA_TABLE_25),
+    ("FixedAssets", FA_TABLE_26),
+    ("NIPA", NIPA_TABLE_1_14),
+    ("NIPA", NIPA_TABLE_1_16),
+    ("NIPA", VA_TABLE_NOMINAL),
+    ("NIPA", VA_TABLE_REAL),
+]
+
 # ── CPS Mare-Winship (NBER) ────────────────────────────────────────────────
 # Two-digit "year" suffix used in NBER's cpsmw{YY}.zip file naming, one file
 # per March CPS extract. cpsmw64.zip is the only year-file currently in use
