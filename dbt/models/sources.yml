@@ -1,0 +1,142 @@
+version: 2
+
+sources:
+  - name: silver
+    description: "Harmonized data produced by the Python pipeline (src/pipelines/*)."
+    schema: silver
+
+    loaded_at_field: loaded_at
+    freshness:
+      warn_after: {count: 14, period: day}
+      error_after: {count: 30, period: day}
+
+    tables:
+      - name: bea_nipa
+        description: >
+          Annual BEA-derived capital-services panel (IT / non-IT capital
+          buckets, Hall-Jorgenson framework), one row per year. Built by
+          src/pipelines/bea_silver_pipeline.py from BEA Fixed Assets and NIPA
+          bronze tables; see docs/data/silver/bea/README.md for the full
+          derivation. Loaded via full TRUNCATE + COPY refresh on every run
+          (src/pipelines/bea_load_to_db.py) — no incremental load, no unique
+          key beyond `year`.
+        columns:
+          - name: year
+            description: "Calendar year, EFF_START (1977) through YEAR_END (2024)."
+            tests:
+              - not_null
+              - unique
+              - dbt_utils.expression_is_true:
+                  arguments:
+                    expression: "between 1975 and 2100"
+
+          - name: cap_it_nom
+            description: "Capital IT (nominal), current USD (millions)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_nonit_nom
+            description: "Capital non-IT (nominal), current USD (millions)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_it_real
+            description: "Capital IT (real), real USD (millions, ref-year prices)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_nonit_real
+            description: "Capital non-IT (real), real USD (millions, ref-year prices)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_it_nom_idx
+            description: "Capital IT index (nominal), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_nonit_nom_idx
+            description: "Capital non-IT index (nominal), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_it_real_idx
+            description: "Capital IT index (real, Tornqvist), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: cap_nonit_real_idx
+            description: "Capital non-IT index (real, Tornqvist), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+
+          - name: rent_it_nom
+            description: "Rental price IT (nominal), current USD."
+            tests: [not_null]
+          - name: rent_nonit_nom
+            description: "Rental price non-IT (nominal), current USD."
+            tests: [not_null]
+          - name: rent_it_real
+            description: "Rental price IT (real), deflated by output price."
+            tests: [not_null]
+          - name: rent_nonit_real
+            description: "Rental price non-IT (real), deflated by output price."
+            tests: [not_null]
+
+          - name: share_it
+            description: "Share of output paid to IT capital."
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  arguments:
+                    expression: "between 0 and 1"
+                  config: {severity: warn}
+          - name: share_nonit
+            description: "Share of output paid to non-IT capital."
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  arguments:
+                    expression: "between 0 and 1"
+                  config: {severity: warn}
+
+          - name: delta_it
+            description: "Effective depreciation rate, IT bucket."
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true: {arguments: {expression: "between 0 and 1"}}
+          - name: delta_nonit
+            description: "Effective depreciation rate, non-IT bucket."
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true: {arguments: {expression: "between 0 and 1"}}
+
+          - name: inv_it_nom
+            description: "Investment in IT (nominal), current USD (millions)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: inv_nonit_nom
+            description: "Investment in non-IT (nominal), current USD (millions)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: inv_it_real
+            description: "Investment in IT (real), real USD (millions, ref-year prices)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: inv_nonit_real
+            description: "Investment in non-IT (real), real USD (millions, ref-year prices)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+
+          - name: r_t
+            description: >
+              Internal rate of return, solved from the capital-income
+              exhaustion identity. Unconstrained: can occasionally go
+              negative alongside a negative net-cost rate for
+              fast-depreciating IT assets (see
+              diagnostics.net_cost_rate_negative in the Python pipeline).
+            tests: [not_null]
+
+          - name: y_nom
+            description: "Output value aggregate (nominal), current USD (millions)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: y_real
+            description: "Output value aggregate (real), real USD (millions, ref-year prices)."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: y_nom_idx
+            description: "Output value index (nominal), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: y_real_idx
+            description: "Output value index (real), = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: p_output
+            description: "Output value deflator, = 1.0 in ref year."
+            tests: [not_null, dbt_utils.expression_is_true: {arguments: {expression: "> 0"}}]
+          - name: pi_output
+            description: "Output value inflation, pct change of the deflator."
+            tests: [not_null]
+
+          - name: loaded_at
+            description: "Timestamp this row was (re)loaded into Postgres — DEFAULT now() on every truncate+refresh."
+            tests: [not_null]
