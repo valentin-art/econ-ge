@@ -2,6 +2,11 @@
     "python.defaultInterpreterPath": ".venv/bin/python",
     "python.terminal.activateEnvironment": true,
 
+    // dbt-core lives only in dbt/.venv (its own env, separate from the root
+    // project's .venv) -- the Python extension's interpreter above has no
+    // dbt installed, so dbt Power User needs pointing at it explicitly.
+    "dbt.dbtPythonPathOverride": "/home/valentin/projects/econ-ge/dbt/.venv/bin/python",
+
     "[python]": {
         "editor.defaultFormatter": "charliermarsh.ruff",
         "editor.formatOnSave": true,
