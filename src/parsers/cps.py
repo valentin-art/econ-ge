@@ -1,17 +1,14 @@
-"""Bronze-layer parsing of raw CPS Mare-Winship extractor files into a tidy
-DataFrame, persisted as bronze parquet.
+"""Bronze-layer parsing of raw CPS Basic / CPS Mare-Winship extractor files
+into a tidy DataFrame, persisted as bronze parquet.
 
-Reads the as-saved zip (fixed-width data file) from
-extractors.cps_mw.CPSMWExtractor plus its covering SPS dictionary, and
-produces one row per person-record with one typed column per SPS variable.
-Kept separate from extraction so it's testable on small in-memory fixed-width
-strings without hitting the network.
+Reads the as-saved zip (fixed-width data file) from extractors.cps plus its
+covering SPS dictionary, and produces one row per person-record with one
+typed column per SPS variable. Kept separate from extraction so it's
+testable on small in-memory fixed-width strings without hitting the network.
 
-SPS dictionary format (NBER's Mare-Winship files use SPSS `input program` /
-`data list file=... /` syntax, confirmed against the actual
-cpsmw64_88.sps/cpsmw89_92.sps dictionaries): one variable per line,
-`name start-end` (1-indexed, inclusive column range; a single trailing number
-means a 1-column field) with variables ending at a lone "." line, e.g.:
+SPS dictionary format (NBER's CPS files use SPSS syntax):
+ - one variable per line
+ - `name start-end` with variables ending at a lone "." line, e.g.:
 
     input program.
     data list file='c:\\cpsmw64.raw' /
@@ -32,17 +29,20 @@ means a 1-column field) with variables ending at a lone "." line, e.g.:
                        2   "no"
                 .
 
-A trailing `(a)` marks a variable alphanumeric (string); everything else is
-numeric (SPS's default when no format is given — unlike BEA's SPS dialect,
-there's no explicit `(F...)` marker here). The `variable labels` block
-(variable name -> human-readable description, one line per variable, no `/`
-separators needed since there's only one description per line) and the
-`value labels` block (variable name -> {numeric code: value label}, one
-variable's codes per `/`-separated group) are both parsed — by
-parse_variable_labels() and parse_value_labels() below — and combined by
-build_variable_dictionary() into the per-year JSON dictionaries under
-parsers/dictionaries/cpsmw/, each variable stored as
-{"Description": ..., "Values": {code: label}}.
+- A trailing `(a)` marks alphanumeric (string) variable
+- Everything else is numeric
+- `variable labels` block contains variable description
+- `value labels` block contains values descriptions
+- SPS-files are transfromed into dicts of the following format:
+    {
+        "start": int,
+        "end": int,
+        "numeric": bool,
+        "Description": ...,
+        "Values": {
+            code: label
+        }
+    }
 """
 
 import io
@@ -55,9 +55,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.input_output.parquet import write_parquet
-from src.schemas.bronze.cps_mw_long import validate_cps_mw_long
-
-DICTIONARIES_DIR = Path(__file__).resolve().parent / "dictionaries" / "cpsmw"
+from src.schemas.bronze.cps_long import validate_cps_long
 
 _VAR_LINE_RE = re.compile(
     r"""
@@ -87,14 +85,14 @@ _VALUE_LABEL_CODE_RE = re.compile(r'^\s*(?P<code>\d+)\s+"(?P<label>[^"]*)"\s*$')
 
 
 @dataclass(frozen=True)
-class CPSMWVariable:
+class CPSVariable:
     name: str
     start: int  # 1-indexed, inclusive
     end: int  # 1-indexed, inclusive
     numeric: bool
 
 
-def parse_sps_dictionary(sps_text: str) -> list[CPSMWVariable]:
+def parse_sps_dictionary(sps_text: str) -> list[CPSVariable]:
     """Parse an SPS `data list file=... /` dictionary into column specs.
 
     Only the variable-definition lines (between the `/` and the terminating
@@ -113,7 +111,7 @@ def parse_sps_dictionary(sps_text: str) -> list[CPSMWVariable]:
         start = int(m.group("start"))
         end = int(m.group("end")) if m.group("end") else start
         variables.append(
-            CPSMWVariable(
+            CPSVariable(
                 name=m.group("name"),
                 start=start,
                 end=end,
@@ -125,7 +123,7 @@ def parse_sps_dictionary(sps_text: str) -> list[CPSMWVariable]:
     return variables
 
 
-def load_sps_dictionary(sps_path: Path) -> list[CPSMWVariable]:
+def load_sps_dictionary(sps_path: Path) -> list[CPSVariable]:
     return parse_sps_dictionary(sps_path.read_text(encoding="latin-1"))
 
 
@@ -196,42 +194,66 @@ def parse_value_labels(sps_text: str) -> dict[str, dict[str, str]]:
 
 
 def build_variable_dictionary(sps_text: str) -> dict[str, dict[str, object]]:
-    """Combine parse_variable_labels + parse_value_labels into the JSON shape
-    persisted by save_variable_dictionary:
+    """Combine parse_sps_dictionary + parse_variable_labels + parse_value_labels
+    into the JSON shape persisted by save_variable_dictionary:
 
-        {variable_name: {"Description": str, "Values": {code: label}}}
-
-    Every variable that has a description and/or value labels gets an entry;
-    a variable with no value labels defined (common for continuous
-    variables, e.g. a weight or an ID) still gets a "Values" key, just an
-    empty dict, so callers can always index it without a KeyError.
+        {variable_name: {"start": int, "end": int, "numeric": bool,
+                          "Description": str, "Values": {code: label}}}
     """
+    variables = parse_sps_dictionary(sps_text)
     descriptions = parse_variable_labels(sps_text)
     value_labels = parse_value_labels(sps_text)
-    variable_names = set(descriptions) | set(value_labels)
     return {
-        name: {
-            "Description": descriptions.get(name, ""),
-            "Values": value_labels.get(name, {}),
+        v.name: {
+            "start": v.start,
+            "end": v.end,
+            "numeric": v.numeric,
+            "Description": descriptions.get(v.name, ""),
+            "Values": value_labels.get(v.name, {}),
         }
-        for name in sorted(variable_names)
+        for v in variables
     }
 
 
+def variables_from_dictionary(
+    variable_dictionary: dict[str, dict[str, object]],
+) -> list[CPSVariable]:
+    """Reconstruct column specs from a built/loaded variable dictionary.
+
+    Sorted by column `start` (not dict/JSON order, which is alphabetical by
+    name after save_variable_dictionary's sort_keys=True) so the resulting
+    column order matches the original fixed-width record layout.
+    """
+    variables = [
+        CPSVariable(
+            name=name,
+            start=int(entry["start"]),  # type: ignore[call-overload]
+            end=int(entry["end"]),  # type: ignore[call-overload]
+            numeric=bool(entry["numeric"]),
+        )
+        for name, entry in variable_dictionary.items()
+    ]
+    return sorted(variables, key=lambda v: v.start)
+
+
 def variable_dictionary_path(
-    year: int, dictionaries_dir: Path = DICTIONARIES_DIR
+    dictionaries_dir: Path,
+    year: int,
+    month: int | None = None,
 ) -> Path:
-    """Where a year's variable dictionary lives: {dictionaries_dir}/cpsmw_{year}.json."""
-    return dictionaries_dir / f"cpsmw_{year}.json"
+    """Path to store dictionaries: {dictionaries_dir}/{year}{month}.json."""
+    month_str = f"{month:02d}" if month is not None else ""
+    return dictionaries_dir / f"{year}{month_str}.json"
 
 
 def save_variable_dictionary(
     variable_dictionary: dict[str, dict[str, object]],
+    dictionaries_dir: Path,
     year: int,
-    dictionaries_dir: Path = DICTIONARIES_DIR,
+    month: int | None = None,
 ) -> Path:
-    """Persist a built variable dictionary as parsers/dictionaries/cpsmw/cpsmw_{year}.json."""
-    out_path = variable_dictionary_path(year, dictionaries_dir)
+    """Save to dictionary storage: data/reference/cps/{source}/{year}{month}.json."""
+    out_path = variable_dictionary_path(dictionaries_dir, year, month)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(variable_dictionary, indent=2, sort_keys=True) + "\n",
@@ -241,31 +263,34 @@ def save_variable_dictionary(
 
 
 def load_variable_dictionary(
-    year: int, dictionaries_dir: Path = DICTIONARIES_DIR
+    dictionaries_dir: Path,
+    year: int,
+    month: int | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Read back a year's variable dictionary saved by save_variable_dictionary."""
-    path = variable_dictionary_path(year, dictionaries_dir)
-    result: dict[str, dict[str, object]] = json.loads(path.read_text(encoding="utf-8"))
+    """Loads a JSON-dictionary."""
+    path = variable_dictionary_path(dictionaries_dir, year, month)
+    result = json.loads(path.read_text(encoding="utf-8"))
     return result
 
 
 def build_and_save_variable_dictionary(
-    sps_path: Path, year: int, dictionaries_dir: Path = DICTIONARIES_DIR
+    sps_path: Path,
+    year: int,
+    month: int | None,
+    dictionaries_dir: Path,
 ) -> Path:
-    """build_variable_dictionary() an SPS file on disk + save_variable_dictionary() in one step."""
+    """Build and save dictionary in one step. Added for convenience."""
     variable_dictionary = build_variable_dictionary(
         sps_path.read_text(encoding="latin-1")
     )
-    return save_variable_dictionary(variable_dictionary, year, dictionaries_dir)
+    return save_variable_dictionary(variable_dictionary, dictionaries_dir, year, month)
 
 
 def _label_key(value: object) -> str:
     """String key to look up `value` in a {code: label} dict.
 
     Columns with any blank/missing cells get coerced to float64 by
-    parse_fixed_width (NaN forces float), so an originally-integer code like
-    5 can arrive here as 5.0 — normalize whole-number floats back to "5" so
-    they still match the SPS dictionary's plain-digit string keys.
+    parse_fixed_width (NaN forces float).
     """
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -275,17 +300,7 @@ def _label_key(value: object) -> str:
 def apply_value_labels(
     df: pd.DataFrame, variable_dictionary: dict[str, dict[str, object]]
 ) -> pd.DataFrame:
-    """Replace numeric codes with their SPS value labels, for readable mart output.
-
-    `variable_dictionary` is the {"Description": ..., "Values": {code:
-    label}} shape built by build_variable_dictionary / loaded via
-    load_variable_dictionary. Returns a new DataFrame; `df` is untouched.
-    Only columns present in both `df` and `variable_dictionary` are touched,
-    and only if that variable's "Values" is non-empty. A code with no entry
-    in the dictionary (common for continuous variables like income, which
-    are never fully enumerated) or a missing value is left as-is rather than
-    becoming NaN — this is a display transform, not a re-validation.
-    """
+    """Replace numeric codes with their SPS value labels, for readable mart output."""
     out = df.copy()
     for column, entry in variable_dictionary.items():
         if column not in out.columns:
@@ -300,15 +315,7 @@ def apply_value_labels(
 
 
 def _extract_dat_text(zip_path: Path) -> str:
-    """Pull the single data member out of a Mare-Winship zip as text.
-
-    Shells out to the system `unzip -p` (streams the sole member to stdout)
-    rather than stdlib zipfile: NBER's archives were built with a zip tool old
-    enough that Python's zipfile rejects their "extra field" data as corrupt,
-    while `unzip`/`7z` read them fine. The archived member also isn't named
-    `*.dat` (it's a plain filename like `cpsmw64`), so `-p` sidesteps needing
-    to know the member name at all.
-    """
+    """Unzip CPS data file."""
     result = subprocess.run(
         ["unzip", "-p", str(zip_path)],
         capture_output=True,
@@ -317,7 +324,7 @@ def _extract_dat_text(zip_path: Path) -> str:
     return result.stdout.decode("latin-1")
 
 
-def parse_fixed_width(text: str, variables: list[CPSMWVariable]) -> pd.DataFrame:
+def parse_fixed_width(text: str, variables: list[CPSVariable]) -> pd.DataFrame:
     """Parse fixed-width record text into a DataFrame using SPS column specs."""
     colspecs = [(v.start - 1, v.end) for v in variables]
     names = [v.name for v in variables]
@@ -327,37 +334,38 @@ def parse_fixed_width(text: str, variables: list[CPSMWVariable]) -> pd.DataFrame
     return df
 
 
-def parse_cps_mw_zip(zip_path: Path, sps_path: Path, year: int) -> pd.DataFrame:
-    """Parse one CPS Mare-Winship zip + SPS dictionary into a tidy wide DataFrame.
-
-    Columns out: Year (int) followed by one column per SPS variable.
-    """
-    variables = load_sps_dictionary(sps_path)
+def parse_cps_zip(
+    zip_path: Path,
+    variable_dictionary: dict[str, dict[str, object]],
+    year: int,
+) -> pd.DataFrame:
+    """Parse one CPS zip into a tidy wide DataFrame using dictionary."""
+    variables = variables_from_dictionary(variable_dictionary)
     dat_text = _extract_dat_text(zip_path)
     df = parse_fixed_width(dat_text, variables)
     year_col = pd.Series(year, index=df.index, name="Year")
     df = pd.concat([year_col, df], axis=1)
-    return validate_cps_mw_long(df)
+    return validate_cps_long(df)
 
 
-def bronze_path(bronze_dir: Path, year: int) -> Path:
-    """Where a CPS-MW year's bronze parquet lives: {bronze_dir}/mw/{year}.parquet."""
-    return bronze_dir / "mw" / f"{year}.parquet"
+def bronze_path(bronze_dir: Path, year: int, month: int | None) -> Path:
+    """Location of bronze data files."""
+    month_str = "" if month is None else f"{month:02d}"
+    if month is not None:
+        return bronze_dir / f"{year}" / f"{year}{month_str}.parquet"
+    return bronze_dir / f"{year}{month_str}.parquet"
 
 
 def parse_to_bronze(
     zip_path: Path,
-    sps_path: Path,
+    variable_dictionary: dict[str, dict[str, object]],
     year: int,
+    month: int | None,
     bronze_dir: Path,
 ) -> Path:
-    """Parse one external CPS-MW zip and persist it as its own bronze parquet.
-
-    One year's zip in -> one parquet file out: a parsing bug or re-run for one
-    year doesn't touch the other years' bronze files.
-    """
-    tidy = parse_cps_mw_zip(zip_path, sps_path, year)
-    out_path = bronze_path(bronze_dir, year)
+    """Parse and save bronze file in one step."""
+    tidy = parse_cps_zip(zip_path, variable_dictionary, year)
+    out_path = bronze_path(bronze_dir, year, month)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_parquet(tidy, out_path)
     return out_path

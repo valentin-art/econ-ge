@@ -1,15 +1,27 @@
-"""BEA source parameters: table names, sample window, and line-number mappings.
+"""Source parameters: table names, sample window, and line-number mappings.
 
-These are fixed methodological choices (which BEA table vintage, which line
-encodes "Net operating surplus", the smoothing window) rather than deployment
-config — so, unlike settings.py, this is a plain constants module, not
-env-driven pydantic settings.
+These are fixed methodological choices:
+ - CPS data sources
+ - BEA tables
+ - Sample window and reference year
+ - Line which encode "Net operating surplus" in BEA data
+ - The smoothing window for BEA data
+
+ Unlike `settings.py`, this is a plain constants module, not env-driven
+ pydantic settings.
 """
 
-# BEA chain-index reference year (verify from Table 2.4 output)
+from typing import Literal
+
+CPSSource = Literal["basic", "mw"]
+
+
+# -- BEA Sample window and reference year ----------------------------------
+
+# BEA chain-index reference year
 REF_YEAR = 1990
 
-# Sample window — FAA detail is reliable from 1975
+# Sample window: FAA detail is reliable from 1975
 YEAR_START = 1975
 YEAR_END = 2024
 YEARS = list(range(YEAR_START, YEAR_END + 1))
@@ -17,13 +29,15 @@ YEARS = list(range(YEAR_START, YEAR_END + 1))
 # First year with valid pi_bar and Tornqvist increment (edges lose 2 years)
 EFF_START = YEAR_START + 2
 
-# Smoothing window for pi_{j,t} — 3-year centred MA is standard in literature
+# Smoothing window for pi_{j,t}: 3-year centred MA is standard in literature
 PI_SMOOTH_WINDOW = 3
 
 # Hard floor on smoothed pi: no asset loses more than 40% in a smoothed year
 PI_FLOOR = -0.40
 
-# ── BEA Fixed Assets tables ───────────────────────────────────────────────
+
+# -- BEA Fixed Assets tables -----------------------------------------------
+#
 # Current-cost net stock, ALL private fixed assets
 FA_TABLE_21 = "FAAt201"
 # Chain-quantity index, net stock
@@ -33,13 +47,24 @@ FA_TABLE_25 = "FAAt205"
 # Chain-quantity index, investment
 FA_TABLE_26 = "FAAt206"
 
-# ── NIPA income tables ────────────────────────────────────────────────────
+
+# -- NIPA income tables ----------------------------------------------------
+#
 # Scope alignment:
-#   FAA 2.1 denominator = all private nonresidential (corporate + noncorporate
-#   + farm + financial + nonprofit).
-#   T11600 (nonfarm nonfinancial private) covers corporate + noncorporate,
-#   excluding farm (<1% of stock) and financial (capital income ≠ user-cost
-#   formula) — best available match for the asset-level stock denominator.
+#   FAA 2.1 denominator - all private nonresidential:
+#      + corp
+#      + noncorp
+#      + farm
+#      + financial
+#      + nonprofit
+#
+#   T11600 (nonfarm nonfin private):
+#      + corp
+#      + noncorp
+#      - farm (<1% of stock)
+#      - financial (capital income ≠ user-cost formula)
+#     Best available match for the asset-level stock denominator.
+#
 #   T11400 (corporate only) is retained for scope-ratio diagnostics.
 
 # Domestic Corporate Business GVA
@@ -47,14 +72,16 @@ NIPA_TABLE_1_14 = "T11400"
 # Domestic Nonfarm Nonfinancial Private Business GVA (primary)
 NIPA_TABLE_1_16 = "T11600"
 
-# T11400 Line 8 — verified: "Net operating surplus"
+# T11400 Line 8 - "Net operating surplus" (NOS)
 NOS_LINE_CORP = 8
-# T11600 Line 2 — verified: "Net operating surplus"
+# T11600 Line 2 - "Net operating surplus" (NOS)
 NOS_LINE_TOTAL = 2
-# alias used downstream
+# Alias used downstream
 NOS_LINE = NOS_LINE_TOTAL
 
-# ── NIPA value-added-by-sector tables (CES output aggregate) ──────────────
+
+# -- NIPA value-added-by-sector tables (CES output aggregate) --------------
+#
 # Nonfarm business sector = Line 3 (a sub-line of Line 2 "Business").
 #
 # Scope-matches the T11600 NOS and the nonfarm-nonfinancial capital stock:
@@ -73,11 +100,8 @@ VA_TABLE_PRICE = "T10304"
 # verified: Line 3 = "Nonfarm" (business)
 VA_LINE_NONFARM = 3
 
-# (dataset, table) pairs pulled by the BEA extract/parse pipeline stages
-# (pipelines.bea_extract_pipeline, pipelines.bea_parse_pipeline) and by the
-# fused pipelines.bea_pipeline.run_capital_pipeline — single source of truth
-# so the two never drift apart. VA_TABLE_PRICE (T10304) is not pulled: no
-# pipeline currently reads it.
+# (dataset, table) pairs pulled by the BEA extract/parse pipeline
+# NOTE: VA_TABLE_PRICE (T10304) is not pulled.
 BEA_TABLES: list[tuple[str, str]] = [
     ("FixedAssets", FA_TABLE_21),
     ("FixedAssets", FA_TABLE_24),
@@ -89,15 +113,13 @@ BEA_TABLES: list[tuple[str, str]] = [
     ("NIPA", VA_TABLE_REAL),
 ]
 
-# ── CPS Mare-Winship (NBER) ────────────────────────────────────────────────
+# -- CPS Mare-Winship (NBER) -----------------------------------------------
+
 # Two-digit "year" suffix used in NBER's cpsmw{YY}.zip file naming, one file
-# per March CPS extract. cpsmw64.zip is the only year-file currently in use
-# (see src/config/cps_source_instructions.md) — extend CPS_MW_YEARS to pull
-# more.
+# per March CPS extract.
 CPS_MW_YEARS = [1964]
 
-# SPS dictionary (fixed-width column layout) covering each year range —
-# NBER ships one dictionary per multi-year span, not one per year.
+# SPS-files are used as dictionary (fixed-width column layout)
 CPS_MW_SPS_RANGES = {
     (1964, 1988): "cpsmw64_88.sps",
     (1989, 1992): "cpsmw89_92.sps",
@@ -110,3 +132,48 @@ def cps_mw_sps_filename(year: int) -> str:
         if start <= year <= end:
             return filename
     raise ValueError(f"No CPS Mare-Winship SPS dictionary covers year {year}")
+
+
+# -- CPS Basic (NBER) ------------------------------------------------------
+#
+# (year, month) periods to pull for CPS Basic
+CPS_BASIC_PERIODS: list[tuple[int, int]] = [(1991, 2)]
+
+_CPS_BASIC_DICT_YEARMONS = [
+    198901,
+    199201,
+    199401,
+    199404,
+    199506,
+    199509,
+    199801,
+    200301,
+    200405,
+    200508,
+    200701,
+    200901,
+    201001,
+    201205,
+    201301,
+    201401,
+    201404,
+    201501,
+    201701,
+    202001,
+    202301,
+    202401,
+    202405,
+    202501,
+    202601,
+]
+
+
+def cps_basic_sps_filename(year: int, month: int) -> str:
+    """The SPS dictionary filename covering `year` and `month`, e.g. 1989, 3 -> cpsb198903.sps."""
+    yearmon = year * 100 + month
+    if yearmon < _CPS_BASIC_DICT_YEARMONS[0]:
+        raise ValueError(f"No CPS Basic SPS dictionary covers {year}-{month:02d}")
+    for start, end in zip(_CPS_BASIC_DICT_YEARMONS, _CPS_BASIC_DICT_YEARMONS[1:]):
+        if start <= yearmon < end:
+            return f"cpsb{start}.sps"
+    return f"cpsb{_CPS_BASIC_DICT_YEARMONS[-1]}.sps"

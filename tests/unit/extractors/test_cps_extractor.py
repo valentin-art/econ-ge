@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.extractors.cps_mw import CPSMWExtractor
+from src.extractors.cps import CPSMWExtractor
 from src.extractors.manifest import read_manifest
 
 
@@ -27,7 +27,7 @@ def test_extract_writes_zip_dictionaries_sps_and_manifest_entry(
             return _FakeResponse(b"fake-zip-bytes")
         return _FakeResponse(b"fake-sps-bytes")
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
@@ -74,7 +74,7 @@ def test_extract_skips_sps_download_if_already_present(
         requested_urls.append(url)
         return _FakeResponse(b"fake-zip-bytes")
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
@@ -98,7 +98,7 @@ def test_extract_skips_zip_download_if_already_present(
         requested_urls.append(url)
         return _FakeResponse(b"fake-sps-bytes")
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
@@ -123,7 +123,7 @@ def test_extract_skips_both_downloads_if_already_present(
     def fake_get(url, headers=None, timeout=None):
         raise AssertionError(f"should not hit the network, but got {url}")
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
@@ -136,7 +136,7 @@ def test_extract_skips_both_downloads_if_already_present(
 def test_download_retries_on_403_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.extractors.cps_mw.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("src.extractors.cps.time.sleep", lambda _seconds: None)
     responses = iter(
         [_FakeResponse(b"", status_code=403), _FakeResponse(b"fake-zip-bytes")]
     )
@@ -146,7 +146,7 @@ def test_download_retries_on_403_then_succeeds(
         calls.append(url)
         return next(responses)
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
@@ -160,7 +160,7 @@ def test_download_retries_on_403_then_succeeds(
 def test_download_raises_after_exhausting_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.extractors.cps_mw.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("src.extractors.cps.time.sleep", lambda _seconds: None)
 
     def fake_get(url, headers=None, timeout=None):
         response = _FakeResponse(b"", status_code=403)
@@ -171,10 +171,55 @@ def test_download_raises_after_exhausting_retries(
         response.raise_for_status = _raise  # type: ignore[method-assign]
         return response
 
-    monkeypatch.setattr("src.extractors.cps_mw.requests.get", fake_get)
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
     extractor = CPSMWExtractor(
         base_url="https://data.nber.org/mare_winship", storage_dir=tmp_path
     )
 
     with pytest.raises(RuntimeError, match="403 Forbidden"):
         extractor._download("cpsmw64.zip")
+
+
+def test_cps_basic_extractor_requires_month(tmp_path: Path) -> None:
+    from src.extractors.cps import CPSBasicExtractor
+
+    extractor = CPSBasicExtractor(
+        base_url="https://data.nber.org/cps-basic3/dat/",
+        storage_dir=tmp_path,
+        sps_base_url="https://data.nber.org/cps-basic3/programs/",
+    )
+
+    with pytest.raises(ValueError, match="requires month"):
+        extractor.extract(year=1991)
+
+
+def test_cps_basic_extractor_writes_zip_and_sps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.extractors.cps import CPSBasicExtractor
+
+    requested_urls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        requested_urls.append(url)
+        if url.endswith(".zip"):
+            return _FakeResponse(b"fake-zip-bytes")
+        return _FakeResponse(b"fake-sps-bytes")
+
+    monkeypatch.setattr("src.extractors.cps.requests.get", fake_get)
+    extractor = CPSBasicExtractor(
+        base_url="https://data.nber.org/cps-basic3/dat/",
+        storage_dir=tmp_path,
+        sps_base_url="https://data.nber.org/cps-basic3/programs/",
+    )
+
+    record = extractor.extract(year=1991, month=2)
+
+    zip_path = tmp_path / "cpsb199102_dat.zip"
+    assert record.file_path == zip_path
+    assert zip_path.read_bytes() == b"fake-zip-bytes"
+    assert record.metadata["month"] == 2
+    assert requested_urls == [
+        "https://data.nber.org/cps-basic3/dat/1991/cpsb199102_dat.zip",
+        "https://data.nber.org/cps-basic3/programs/cpsb198901.sps",
+    ]

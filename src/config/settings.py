@@ -7,9 +7,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Populate os.environ from .env (if present) before any Settings subclass reads
-# it below — makes BEA_API_KEY etc. available regardless of whether the caller's
-# shell has direnv active (jobs/, pytest, Docker all just work). Never overrides
-# variables already set in the real environment (load_dotenv default).
+# it below:
+#  - Makes BEA_API_KEY etc. available regardless of whether the caller's
+#    shell has direnv active.
+#  - Never overrides variables already set in the real environment.
 load_dotenv()
 
 
@@ -31,12 +32,32 @@ class DataPaths(BaseSettings):
         return self.root / "silver"
 
     @property
+    def reference(self) -> Path:
+        return self.root / "reference"
+
+    @property
     def features(self) -> Path:
         return self.root / "features"
 
     @property
     def outputs(self) -> Path:
         return self.root / "outputs"
+
+    def cps_external_dir(self, source: str) -> Path:
+        """Raw zip/SPS storage for a CPS source, e.g. data/external/cps/basic/."""
+        return self.external / "cps" / source
+
+    def cps_raw_dictionaries_dir(self, source: str) -> Path:
+        """Raw .sps dictionaries for a CPS source, e.g. data/external/cps/mw/dictionaries/."""
+        return self.cps_external_dir(source) / "dictionaries"
+
+    def cps_bronze_dir(self, source: str) -> Path:
+        """Bronze parquet root for a CPS source, e.g. data/bronze/cps/basic/."""
+        return self.bronze / "cps" / source
+
+    def cps_clean_dictionaries_dir(self, source: str) -> Path:
+        """Cleaned JSON variable dictionaries for a CPS source, e.g. data/reference/cps/mw/."""
+        return self.reference / "cps" / source
 
 
 class Settings(BaseSettings):
@@ -45,6 +66,13 @@ class Settings(BaseSettings):
     ipums_api_key: str = Field(default="", alias="IPUMS_API_KEY")
     cps_mw_base_url: str = Field(
         default="https://data.nber.org/mare_winship", alias="CPS_MW_BASE_URL"
+    )
+    cps_basic_base_url: str = Field(
+        default="https://data.nber.org/cps-basic3/dat/", alias="CPS_BASIC_BASE_URL"
+    )
+    cps_basic_sps_base_url: str = Field(
+        default="https://data.nber.org/cps-basic3/programs/",
+        alias="CPS_BASIC_SPS_BASE_URL",
     )
     postgres_user: str = Field(default="", alias="POSTGRES_USER")
     postgres_password: str = Field(default="", alias="POSTGRES_PASSWORD")

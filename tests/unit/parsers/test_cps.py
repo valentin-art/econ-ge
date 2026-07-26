@@ -5,14 +5,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.parsers.cps_mw import (
-    CPSMWVariable,
+from src.parsers.cps import (
+    CPSVariable,
     apply_value_labels,
     bronze_path,
     build_and_save_variable_dictionary,
     build_variable_dictionary,
     load_variable_dictionary,
-    parse_cps_mw_zip,
+    parse_cps_zip,
     parse_fixed_width,
     parse_sps_dictionary,
     parse_to_bronze,
@@ -20,6 +20,7 @@ from src.parsers.cps_mw import (
     parse_variable_labels,
     save_variable_dictionary,
     variable_dictionary_path,
+    variables_from_dictionary,
 )
 
 # Mirrors the real NBER dictionary syntax (confirmed against the actual
@@ -60,17 +61,17 @@ def test_parse_sps_dictionary_extracts_variables() -> None:
     variables = parse_sps_dictionary(_SPS_TEXT)
 
     assert variables == [
-        CPSMWVariable(name="hhid", start=1, end=5, numeric=True),
-        CPSMWVariable(name="state", start=6, end=7, numeric=False),
-        CPSMWVariable(name="age", start=8, end=9, numeric=True),
-        CPSMWVariable(name="wgt", start=10, end=17, numeric=True),
+        CPSVariable(name="hhid", start=1, end=5, numeric=True),
+        CPSVariable(name="state", start=6, end=7, numeric=False),
+        CPSVariable(name="age", start=8, end=9, numeric=True),
+        CPSVariable(name="wgt", start=10, end=17, numeric=True),
     ]
 
 
 def test_parse_sps_dictionary_single_column_field() -> None:
     sps_text = "data list file='x' /\n    flag 3\n.\n"
     variables = parse_sps_dictionary(sps_text)
-    assert variables == [CPSMWVariable(name="flag", start=3, end=3, numeric=True)]
+    assert variables == [CPSVariable(name="flag", start=3, end=3, numeric=True)]
 
 
 def test_parse_sps_dictionary_ignores_variable_labels_block() -> None:
@@ -111,37 +112,81 @@ def test_parse_value_labels_returns_empty_dict_when_no_block() -> None:
     assert parse_value_labels("data list file='x' /\n flag 3\n.\n") == {}
 
 
-def test_build_variable_dictionary_combines_descriptions_and_values() -> None:
+def test_build_variable_dictionary_combines_positions_descriptions_and_values() -> None:
     variable_dictionary = build_variable_dictionary(_SPS_TEXT)
 
     assert variable_dictionary == {
-        "hhid": {"Description": "Household ID", "Values": {}},
+        "hhid": {
+            "start": 1,
+            "end": 5,
+            "numeric": True,
+            "Description": "Household ID",
+            "Values": {},
+        },
         "state": {
+            "start": 6,
+            "end": 7,
+            "numeric": False,
             "Description": "State",
             "Values": {"1": "California", "2": "Texas"},
         },
         "age": {
+            "start": 8,
+            "end": 9,
+            "numeric": True,
             "Description": "Age",
             "Values": {"99": "missing/invalid"},
         },
-        "wgt": {"Description": "Weight", "Values": {}},
+        "wgt": {
+            "start": 10,
+            "end": 17,
+            "numeric": True,
+            "Description": "Weight",
+            "Values": {},
+        },
     }
 
 
-def test_variable_dictionary_path_builds_cpsmw_year_json_path(tmp_path: Path) -> None:
-    assert variable_dictionary_path(1964, tmp_path) == tmp_path / "cpsmw_1964.json"
+def test_variables_from_dictionary_reconstructs_specs_sorted_by_start() -> None:
+    variable_dictionary = {
+        "wgt": {"start": 10, "end": 17, "numeric": True},
+        "hhid": {"start": 1, "end": 5, "numeric": True},
+        "state": {"start": 6, "end": 7, "numeric": False},
+    }
+
+    variables = variables_from_dictionary(variable_dictionary)
+
+    assert variables == [
+        CPSVariable(name="hhid", start=1, end=5, numeric=True),
+        CPSVariable(name="state", start=6, end=7, numeric=False),
+        CPSVariable(name="wgt", start=10, end=17, numeric=True),
+    ]
+
+
+def test_variable_dictionary_path_builds_year_json_path(tmp_path: Path) -> None:
+    assert variable_dictionary_path(tmp_path, 1964) == tmp_path / "1964.json"
+
+
+def test_variable_dictionary_path_includes_month(tmp_path: Path) -> None:
+    assert variable_dictionary_path(tmp_path, 1991, 2) == tmp_path / "199102.json"
 
 
 def test_save_and_load_variable_dictionary_round_trip(tmp_path: Path) -> None:
     variable_dictionary = {
-        "state": {"Description": "State", "Values": {"1": "California", "2": "Texas"}}
+        "state": {
+            "start": 6,
+            "end": 7,
+            "numeric": False,
+            "Description": "State",
+            "Values": {"1": "California", "2": "Texas"},
+        }
     }
 
-    out_path = save_variable_dictionary(variable_dictionary, 1964, tmp_path)
+    out_path = save_variable_dictionary(variable_dictionary, tmp_path, 1964)
 
-    assert out_path == tmp_path / "cpsmw_1964.json"
+    assert out_path == tmp_path / "1964.json"
     assert json.loads(out_path.read_text()) == variable_dictionary
-    assert load_variable_dictionary(1964, tmp_path) == variable_dictionary
+    assert load_variable_dictionary(tmp_path, 1964) == variable_dictionary
 
 
 def test_build_and_save_variable_dictionary_parses_sps_file_and_saves(
@@ -151,11 +196,16 @@ def test_build_and_save_variable_dictionary_parses_sps_file_and_saves(
     sps_path.write_text(_SPS_TEXT)
     dictionaries_dir = tmp_path / "dictionaries"
 
-    out_path = build_and_save_variable_dictionary(sps_path, 1964, dictionaries_dir)
+    out_path = build_and_save_variable_dictionary(
+        sps_path, 1964, None, dictionaries_dir
+    )
 
-    assert out_path == dictionaries_dir / "cpsmw_1964.json"
-    loaded = load_variable_dictionary(1964, dictionaries_dir)
+    assert out_path == dictionaries_dir / "1964.json"
+    loaded = load_variable_dictionary(dictionaries_dir, 1964)
     assert loaded["state"] == {
+        "start": 6,
+        "end": 7,
+        "numeric": False,
         "Description": "State",
         "Values": {"1": "California", "2": "Texas"},
     }
@@ -219,40 +269,44 @@ def test_parse_fixed_width_reads_columns_by_spec() -> None:
     assert df["wgt"].tolist() == [123.45, 98.70]
 
 
-def _write_zip_and_sps(tmp_path: Path) -> tuple[Path, Path]:
+def _write_zip_and_dictionary(tmp_path: Path) -> tuple[Path, dict]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     zip_path = tmp_path / "cpsmw64.zip"
     # NBER's real archives contain one arbitrarily-named member (e.g.
     # "cpsmw64", no extension) — mirror that instead of "*.dat" naming.
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("cpsmw64", _DAT_TEXT)
-    sps_path = tmp_path / "cpsmw64_88.sps"
-    sps_path.write_text(_SPS_TEXT)
-    return zip_path, sps_path
+    variable_dictionary = build_variable_dictionary(_SPS_TEXT)
+    return zip_path, variable_dictionary
 
 
-def test_parse_cps_mw_zip_returns_tidy_frame_with_year(tmp_path: Path) -> None:
-    zip_path, sps_path = _write_zip_and_sps(tmp_path)
+def test_parse_cps_zip_returns_tidy_frame_with_year(tmp_path: Path) -> None:
+    zip_path, variable_dictionary = _write_zip_and_dictionary(tmp_path)
 
-    out = parse_cps_mw_zip(zip_path, sps_path, year=1964)
+    out = parse_cps_zip(zip_path, variable_dictionary, year=1964)
 
     assert list(out.columns) == ["Year", "hhid", "state", "age", "wgt"]
     assert (out["Year"] == 1964).all()
     assert out["hhid"].tolist() == [12345, 12346]
 
 
-def test_bronze_path_builds_mw_year_parquet_path(tmp_path: Path) -> None:
-    path = bronze_path(tmp_path, 1964)
-    assert path == tmp_path / "mw" / "1964.parquet"
+def test_bronze_path_builds_annual_parquet_path(tmp_path: Path) -> None:
+    path = bronze_path(tmp_path, 1964, None)
+    assert path == tmp_path / "1964.parquet"
 
 
-def test_parse_to_bronze_writes_parquet_for_one_year(tmp_path: Path) -> None:
-    zip_path, sps_path = _write_zip_and_sps(tmp_path / "external")
+def test_bronze_path_builds_monthly_nested_parquet_path(tmp_path: Path) -> None:
+    path = bronze_path(tmp_path, 1991, 2)
+    assert path == tmp_path / "1991" / "199102.parquet"
+
+
+def test_parse_to_bronze_writes_parquet_for_one_period(tmp_path: Path) -> None:
+    zip_path, variable_dictionary = _write_zip_and_dictionary(tmp_path / "external")
     bronze_dir = tmp_path / "bronze"
 
-    out_path = parse_to_bronze(zip_path, sps_path, 1964, bronze_dir)
+    out_path = parse_to_bronze(zip_path, variable_dictionary, 1964, None, bronze_dir)
 
-    assert out_path == bronze_dir / "mw" / "1964.parquet"
+    assert out_path == bronze_dir / "1964.parquet"
     assert out_path.exists()
     written = pd.read_parquet(out_path)
     assert written["hhid"].tolist() == [12345, 12346]

@@ -22,7 +22,7 @@ repos:
     rev: v1.13.0
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic, polars, types-PyYAML]
+        additional_dependencies: [pydantic, polars, types-PyYAML, types-requests]
         files: ^src/
 
   - repo: https://github.com/sqlfluff/sqlfluff
