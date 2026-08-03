@@ -59,6 +59,14 @@ class DataPaths(BaseSettings):
         """Cleaned JSON variable dictionaries for a CPS source, e.g. data/reference/cps/mw/."""
         return self.reference / "cps" / source
 
+    def ipums_bronze_dir(self, collection: str) -> Path:
+        """Bronze parquet root for an IPUMS collection, e.g. data/bronze/ipums/cps/."""
+        return self.bronze / "ipums" / collection
+
+    def ipums_clean_dictionaries_dir(self, collection: str) -> Path:
+        """Cleaned JSON variable dictionaries for an IPUMS collection, e.g. data/reference/ipums/cps/."""
+        return self.reference / "ipums" / collection
+
 
 class Settings(BaseSettings):
     paths: DataPaths = DataPaths()
