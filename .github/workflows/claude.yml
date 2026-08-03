@@ -12,11 +12,6 @@ on:
       - '**/*.md'
       - '.github/**'
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 concurrency:
   group: claude-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
@@ -61,12 +56,13 @@ jobs:
         contents: read
         pull-requests: write
         issues: read
+        id-token: write
       steps:
         - name: Checkout repository
           uses: actions/checkout@v4
           with:
             fetch-depth: 0
-  
+
         - name: Run Claude Code Review
           uses: anthropics/claude-code-action@v1
           with:
@@ -75,7 +71,7 @@ jobs:
             prompt: |
               Review this pull request diff against the conventions in CLAUDE.md.
 
-  
+
               Focus on:
               - Business logic leaking into Dagster assets or dbt models
               - Hardcoded paths, hosts, or credentials instead of
@@ -92,7 +88,7 @@ jobs:
               - Major: Likely bug, large performance/memory issue, confusing API, flaky behavior
               - Minor: Readability, small performance/style issues, incomplete doc/types
               - Nit: Tiny consistency/style suggestions
-              
+
               Post inline comments on the specific lines with issues. If
               nothing significant is found, post a short confirmation instead
               of listing minor style preferences.

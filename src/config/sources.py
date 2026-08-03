@@ -11,7 +11,7 @@ These are fixed methodological choices:
  pydantic settings.
 """
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 CPSSource = Literal["basic", "mw"]
 
@@ -177,3 +177,67 @@ def cps_basic_sps_filename(year: int, month: int) -> str:
         if start <= yearmon < end:
             return f"cpsb{start}.sps"
     return f"cpsb{_CPS_BASIC_DICT_YEARMONS[-1]}.sps"
+
+
+# -- IPUMS ------------------------------------------------------------------
+
+CPS_VARS = [
+    # Identifiers
+    "YEAR",
+    "SERIAL",
+    "PERNUM",
+    "STATEFIP",
+    "CPSID",
+    "CPSIDP",
+    "MISH",
+    "ASECFLAG",
+    # Weights
+    "ASECWT",
+    "ASECWTH",
+    # Demography
+    "AGE",
+    "SEX",
+    "RACE",
+    "HISPAN",
+    "RELATE",
+    "MARST",
+    # Schooling
+    "EDUC",
+    # Labor supply
+    "POPSTAT",
+    "EMPSTAT",
+    "LABFORCE",
+    "FULLPART",
+    "AHRSWORKT",
+    "UHRSWORKLY",
+    "WKSWORK1",
+    "WKSWORK2",
+    "WHYNWLY",
+    "INDLY",
+    "CLASSWLY",
+    "OCCLY",
+    "OCC",
+    # Earnings
+    "INCWAGE",
+    "INCBUS",
+    "INCFARM",
+    "SRCEARN",
+]
+
+
+class IPUMSExtractRequest(NamedTuple):
+    collection: str
+    samples: tuple[str, ...]
+    variables: tuple[str, ...]
+    description: str = ""
+
+
+# Microdata extracts pulled by the IPUMS extract/parse pipeline.
+IPUMS_EXTRACTS: list[IPUMSExtractRequest] = [
+    IPUMSExtractRequest(
+        collection="cps",
+        samples=("cps2006_09s",),
+        variables=("AGE", "SEX"),
+        description="econ-ge CPS extract",
+    ),
+]
