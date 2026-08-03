@@ -172,8 +172,8 @@ class IPUMSExtractor(Extractor):
                 )
         metadata = {
             "collection": collection,
-            "samples": samples,
-            "variables": variables,
+            "samples": tuple(samples),
+            "variables": tuple(variables),
             "data_structure": effective_data_structure,
             "data_quality_flags": data_quality_flags,
             "extract_id": extract_id,
