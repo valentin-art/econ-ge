@@ -233,8 +233,8 @@ def test_extract_incremental_submits_new_samples_extract(tmp_path: Path) -> None
 
     assert client.submit_calls == 1
     assert len(records) == 1
-    assert records[0].metadata["samples"] == ["cps2007_09s"]
-    assert records[0].metadata["variables"] == ["AGE", "SEX"]
+    assert records[0].metadata["samples"] == ("cps2007_09s",)
+    assert records[0].metadata["variables"] == ("AGE", "SEX")
     assert records[0].metadata["request_kind"] == "new_samples"
     assert (tmp_path / "cps" / "_COVERAGE.yaml").exists()
 
@@ -255,8 +255,8 @@ def test_extract_incremental_submits_variable_delta_extract(tmp_path: Path) -> N
 
     assert client.submit_calls == 1
     assert len(records) == 1
-    assert records[0].metadata["samples"] == ["cps2006_09s"]
-    assert records[0].metadata["variables"] == ["RACE"]
+    assert records[0].metadata["samples"] == ("cps2006_09s",)
+    assert records[0].metadata["variables"] == ("RACE",)
     assert records[0].metadata["request_kind"] == "variable_delta"
 
 
@@ -286,10 +286,10 @@ def test_extract_incremental_submits_both_when_years_and_variables_differ(
     delta_records = [
         r for r in records if r.metadata["request_kind"] == "variable_delta"
     ]
-    assert new_samples_records[0].metadata["samples"] == ["cps2007_09s"]
-    assert new_samples_records[0].metadata["variables"] == ["AGE", "SEX", "RACE"]
-    assert delta_records[0].metadata["samples"] == ["cps2006_09s"]
-    assert delta_records[0].metadata["variables"] == ["RACE"]
+    assert new_samples_records[0].metadata["samples"] == ("cps2007_09s",)
+    assert new_samples_records[0].metadata["variables"] == ("AGE", "RACE", "SEX")
+    assert delta_records[0].metadata["samples"] == ("cps2006_09s",)
+    assert delta_records[0].metadata["variables"] == ("RACE",)
 
 
 def test_extract_incremental_force_bypasses_planning(tmp_path: Path) -> None:
