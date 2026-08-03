@@ -31,7 +31,11 @@ RequestKind = Literal["new_samples", "variable_delta"]
 
 
 def find_matching_extract(
-    collection_dir: Path, samples: list[str], variables: list[str]
+    collection_dir: Path,
+    samples: list[str],
+    variables: list[str],
+    data_structure: dict[str, dict[str, str]],
+    data_quality_flags: bool,
 ) -> tuple[Path, Path, int] | None:
     """Return (data_path, ddi_path, extract_id) for the most recent manifest
     entry in `collection_dir` whose samples exactly match `samples` and whose
@@ -46,6 +50,10 @@ def find_matching_extract(
         if set(metadata["samples"]) != requested_samples:
             continue
         if not requested_variables <= set(metadata["variables"]):
+            continue
+        if metadata.get("data_structure") != data_structure:
+            continue
+        if metadata.get("data_quality_flags") != data_quality_flags:
             continue
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
@@ -80,7 +88,7 @@ class IPUMSExtractor(Extractor):
         variables: list[str],
         description: str = "",
         data_quality_flags: bool = True,
-        data_structure: dict | None = None,
+        data_structure: dict[str, dict[str, str]] | None = None,
         request_kind: RequestKind = "new_samples",
         force: bool = False,
     ) -> ExtractionRecord:
@@ -109,7 +117,17 @@ class IPUMSExtractor(Extractor):
         collection_dir.mkdir(parents=True, exist_ok=True)
 
         cached = (
-            None if force else find_matching_extract(collection_dir, samples, variables)
+            None
+            if force
+            else find_matching_extract(
+                collection_dir,
+                samples,
+                variables,
+                data_structure
+                if data_structure is not None
+                else dict(_DEFAULT_DATA_STRUCTURE),
+                data_quality_flags,
+            )
         )
         if cached is not None:
             data_path, ddi_path, extract_id = cached
@@ -129,7 +147,7 @@ class IPUMSExtractor(Extractor):
                 data_structure=(
                     data_structure
                     if data_structure is not None
-                    else _DEFAULT_DATA_STRUCTURE
+                    else dict(_DEFAULT_DATA_STRUCTURE)
                 ),
             )
             self.client.submit_extract(microdata_extract)
@@ -171,6 +189,8 @@ class IPUMSExtractor(Extractor):
         collection: str,
         samples: list[str],
         variables: list[str],
+        data_quality_flags: bool = True,
+        data_structure: dict[str, dict[str, str]] | None = None,
         description: str = "",
         force: bool = False,
     ) -> list[ExtractionRecord]:
@@ -191,15 +211,17 @@ class IPUMSExtractor(Extractor):
         """
         collection_dir = self.storage_dir / collection
         if force:
-            return [
-                self.extract(
-                    collection=collection,
-                    samples=samples,
-                    variables=variables,
-                    description=description,
-                    force=True,
-                )
-            ]
+            record = self.extract(
+                collection=collection,
+                samples=samples,
+                variables=variables,
+                data_quality_flags=data_quality_flags,
+                data_structure=data_structure,
+                description=description,
+                force=True,
+            )
+            save_coverage(build_coverage(collection_dir, collection), collection_dir)
+            return [record]
 
         coverage = build_coverage(collection_dir, collection)
         planned = plan_delta_requests(coverage, samples, variables)
@@ -219,6 +241,8 @@ class IPUMSExtractor(Extractor):
                 variables=plan.variables,
                 description=description,
                 request_kind=plan.request_kind,
+                data_quality_flags=data_quality_flags,
+                data_structure=data_structure,
             )
             for plan in planned
         ]

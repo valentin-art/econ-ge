@@ -146,6 +146,7 @@ def plan_delta_requests(
       covered, nothing new to submit.
     """
     requested_variables = set(variables)
+    normalized_variables = sorted(requested_variables)
     new_samples: list[str] = []
     stale_samples: list[str] = []
     missing_variables: set[str] = set()
@@ -162,7 +163,7 @@ def plan_delta_requests(
 
     planned: list[PlannedExtract] = []
     if new_samples:
-        planned.append(PlannedExtract(new_samples, list(variables), "new_samples"))
+        planned.append(PlannedExtract(new_samples, normalized_variables, "new_samples"))
     if stale_samples:
         planned.append(
             PlannedExtract(stale_samples, sorted(missing_variables), "variable_delta")
