@@ -4,6 +4,7 @@ Submits a microdata extract request, waits for it to complete, and downloads
 the data file and its DDI codebook as-is.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import structlog
@@ -32,8 +33,8 @@ def _default_data_structure() -> dict[str, dict[str, str]]:
 
 def find_matching_extract(
     collection_dir: Path,
-    samples: list[str],
-    variables: list[str],
+    samples: Sequence[str],
+    variables: Sequence[str],
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
 ) -> tuple[Path, Path, int] | None:
@@ -90,8 +91,8 @@ class IPUMSExtractor(Extractor):
     def extract(
         self,
         collection: str,
-        samples: list[str],
-        variables: list[str],
+        samples: Sequence[str],
+        variables: Sequence[str],
         description: str = "",
         data_quality_flags: bool = True,
         data_structure: dict[str, dict[str, str]] | None = None,
@@ -148,8 +149,8 @@ class IPUMSExtractor(Extractor):
         else:
             microdata_extract = MicrodataExtract(
                 collection=collection,
-                samples=samples,
-                variables=variables,
+                samples=list(samples),
+                variables=list(variables),
                 description=description,
                 data_quality_flags=data_quality_flags,
                 data_structure=effective_data_structure,
@@ -201,8 +202,8 @@ class IPUMSExtractor(Extractor):
     def extract_incremental(
         self,
         collection: str,
-        samples: list[str],
-        variables: list[str],
+        samples: Sequence[str],
+        variables: Sequence[str],
         data_quality_flags: bool = True,
         data_structure: dict[str, dict[str, str]] | None = None,
         description: str = "",
@@ -225,8 +226,8 @@ class IPUMSExtractor(Extractor):
 
         Args:
             collection (str): IPUMS collection name, e.g. "cps" or "usa"
-            samples (list[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
-            variables (list[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
+            samples (Sequence[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
+            variables (Sequence[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
             data_quality_flags (bool): Whether to pull IPUMS Data quality flags
             data_structure (dict[str, dict[str, str]] | None): A form of data to pull: Hierarchical or rectangular data
             description (str): Description of the extract, stored in the manifest entry's metadata

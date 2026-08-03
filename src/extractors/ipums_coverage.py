@@ -11,6 +11,7 @@ submit_extract call counts against the user's IPUMS account quota).
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -131,8 +132,8 @@ class PlannedExtract:
 
 def plan_delta_requests(
     coverage: CollectionCoverage,
-    samples: list[str],
-    variables: list[str],
+    samples: Sequence[str],
+    variables: Sequence[str],
 ) -> list[PlannedExtract]:
     """Work out the minimal set of new extracts (0, 1, or 2) needed for
     `coverage` to fully cover `samples` (all of them) with `variables` (all
