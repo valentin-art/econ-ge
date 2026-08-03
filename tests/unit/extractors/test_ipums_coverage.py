@@ -163,8 +163,8 @@ def test_plan_delta_requests_new_samples_only() -> None:
 
     assert len(planned) == 1
     assert planned[0].request_kind == "new_samples"
-    assert planned[0].samples == ["cps2007_09s"]
-    assert planned[0].variables == ["AGE", "SEX"]
+    assert planned[0].samples == ("cps2007_09s",)
+    assert planned[0].variables == ("AGE", "SEX")
 
 
 def test_plan_delta_requests_variable_delta_only() -> None:
@@ -174,8 +174,8 @@ def test_plan_delta_requests_variable_delta_only() -> None:
 
     assert len(planned) == 1
     assert planned[0].request_kind == "variable_delta"
-    assert planned[0].samples == ["cps2006_09s"]
-    assert planned[0].variables == ["RACE"]
+    assert planned[0].samples == ("cps2006_09s",)
+    assert planned[0].variables == ("RACE",)
 
 
 def test_plan_delta_requests_both_new_samples_and_variable_delta() -> None:
@@ -187,8 +187,8 @@ def test_plan_delta_requests_both_new_samples_and_variable_delta() -> None:
 
     assert len(planned) == 2
     assert planned[0].request_kind == "new_samples"
-    assert planned[0].samples == ["cps2007_09s"]
-    assert planned[0].variables == ["AGE", "RACE"]
+    assert planned[0].samples == ("cps2007_09s",)
+    assert planned[0].variables == ("AGE", "RACE")
     assert planned[1].request_kind == "variable_delta"
-    assert planned[1].samples == ["cps2006_09s"]
-    assert planned[1].variables == ["RACE"]
+    assert planned[1].samples == ("cps2006_09s",)
+    assert planned[1].variables == ("RACE",)

@@ -124,8 +124,8 @@ def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:
 
 @dataclass(frozen=True)
 class PlannedExtract:
-    samples: list[str]
-    variables: list[str]
+    samples: tuple[str, ...]
+    variables: tuple[str, ...]
     request_kind: RequestKind
 
 
@@ -168,9 +168,15 @@ def plan_delta_requests(
 
     planned: list[PlannedExtract] = []
     if new_samples:
-        planned.append(PlannedExtract(new_samples, normalized_variables, "new_samples"))
+        planned.append(
+            PlannedExtract(
+                tuple(new_samples), tuple(normalized_variables), "new_samples"
+            )
+        )
     if stale_samples:
         planned.append(
-            PlannedExtract(stale_samples, sorted(missing_variables), "variable_delta")
+            PlannedExtract(
+                tuple(stale_samples), tuple(sorted(missing_variables)), "variable_delta"
+            )
         )
     return planned

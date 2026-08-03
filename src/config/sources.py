@@ -227,8 +227,8 @@ CPS_VARS = [
 
 class IPUMSExtractRequest(NamedTuple):
     collection: str
-    samples: list[str]
-    variables: list[str]
+    samples: tuple[str, ...]
+    variables: tuple[str, ...]
     description: str = ""
 
 
@@ -236,8 +236,8 @@ class IPUMSExtractRequest(NamedTuple):
 IPUMS_EXTRACTS: list[IPUMSExtractRequest] = [
     IPUMSExtractRequest(
         collection="cps",
-        samples=["cps2006_09s"],
-        variables=["AGE", "SEX"],
+        samples=("cps2006_09s",),
+        variables=("AGE", "SEX"),
         description="econ-ge CPS extract",
     ),
 ]
