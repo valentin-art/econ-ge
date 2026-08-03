@@ -5,7 +5,6 @@ the data file and its DDI codebook as-is.
 """
 
 from pathlib import Path
-from typing import Literal
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
@@ -17,6 +16,7 @@ from src.extractors.base import (
     build_extraction_record,
 )
 from src.extractors.ipums_coverage import (
+    RequestKind,
     build_coverage,
     plan_delta_requests,
     save_coverage,
@@ -25,9 +25,9 @@ from src.extractors.manifest import append_to_manifest, read_manifest
 
 log = structlog.get_logger(__name__)
 
-_DEFAULT_DATA_STRUCTURE = {"rectangular": {"on": "P"}}
 
-RequestKind = Literal["new_samples", "variable_delta"]
+def _default_data_structure() -> dict[str, dict[str, str]]:
+    return {"rectangular": {"on": "P"}}
 
 
 def find_matching_extract(
@@ -40,7 +40,7 @@ def find_matching_extract(
     """Return (data_path, ddi_path, extract_id) for the most recent manifest
     entry in `collection_dir` whose samples exactly match `samples` and whose
     variables are a superset of `variables`, provided its data file and DDI
-    codebook both still exist on disk. None if no such entry exists.
+    codebook both still exist on disk. The data_structure and data_quality_flags must also match. Returns None if no such entry exists.
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
@@ -123,9 +123,7 @@ class IPUMSExtractor(Extractor):
         collection_dir.mkdir(parents=True, exist_ok=True)
 
         effective_data_structure = (
-            data_structure
-            if data_structure is not None
-            else dict(_DEFAULT_DATA_STRUCTURE)
+            data_structure if data_structure is not None else _default_data_structure()
         )
 
         cached = (

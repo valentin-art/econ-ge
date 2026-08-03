@@ -23,6 +23,8 @@ _SAMPLE_YEAR_RE = re.compile(r"(\d{4})")
 
 _COVERAGE_FILENAME = "_COVERAGE.yaml"
 
+RequestKind = Literal["new_samples", "variable_delta"]
+
 
 def parse_sample_year(sample: str) -> int | None:
     """Best-effort year parsed out of an IPUMS sample id, e.g. 'cps2006_09s'
@@ -124,7 +126,7 @@ def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:
 class PlannedExtract:
     samples: list[str]
     variables: list[str]
-    request_kind: Literal["new_samples", "variable_delta"]
+    request_kind: RequestKind
 
 
 def plan_delta_requests(
