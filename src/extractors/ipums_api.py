@@ -72,6 +72,12 @@ class IPUMSExtractor(Extractor):
         client: IpumsApiClient | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.ipums_api_key
+
+        if client is None and not self.api_key:
+            raise ValueError(
+                "IPUMS_API_KEY is not set; pass api_key= or set it in the environment."
+            )
+
         self.storage_dir = (
             storage_dir
             if storage_dir is not None
@@ -116,6 +122,12 @@ class IPUMSExtractor(Extractor):
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
 
+        effective_data_structure = (
+            data_structure
+            if data_structure is not None
+            else dict(_DEFAULT_DATA_STRUCTURE)
+        )
+
         cached = (
             None
             if force
@@ -123,9 +135,7 @@ class IPUMSExtractor(Extractor):
                 collection_dir,
                 samples,
                 variables,
-                data_structure
-                if data_structure is not None
-                else dict(_DEFAULT_DATA_STRUCTURE),
+                effective_data_structure,
                 data_quality_flags,
             )
         )
@@ -144,11 +154,7 @@ class IPUMSExtractor(Extractor):
                 variables=variables,
                 description=description,
                 data_quality_flags=data_quality_flags,
-                data_structure=(
-                    data_structure
-                    if data_structure is not None
-                    else dict(_DEFAULT_DATA_STRUCTURE)
-                ),
+                data_structure=effective_data_structure,
             )
             self.client.submit_extract(microdata_extract)
             self.client.wait_for_extract(microdata_extract)
@@ -157,10 +163,20 @@ class IPUMSExtractor(Extractor):
             data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
             ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
 
+            if not data_path.exists() or not ddi_path.exists():
+                found = sorted(
+                    p.name for p in collection_dir.glob(f"*{extract_id:05d}*")
+                )
+                raise FileNotFoundError(
+                    f"Expected {data_path.name} and {ddi_path.name} after download, "
+                    f"found instead: {found}"
+                )
         metadata = {
             "collection": collection,
             "samples": samples,
             "variables": variables,
+            "data_structure": effective_data_structure,
+            "data_quality_flags": data_quality_flags,
             "extract_id": extract_id,
             "ddi_path": str(ddi_path),
             "cached": cached is not None,
@@ -208,6 +224,18 @@ class IPUMSExtractor(Extractor):
 
         `force=True` skips coverage-checking entirely and submits a single
         fresh extract for exactly (samples, variables), like extract(force=True).
+
+        Args:
+            collection (str): IPUMS collection name, e.g. "cps" or "usa"
+            samples (list[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
+            variables (list[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
+            data_quality_flags (bool): Whether to pull IPUMS Data quality flags
+            data_structure (dict[str, dict[str, str]] | None): A form of data to pull: Hierarchical or rectangular data
+            description (str): Description of the extract, stored in the manifest entry's metadata
+            force (bool): If True, submit and download a new extract even if a manifest entry already covers this exact (samples, variables) request, instead of reusing it
+
+        Returns:
+            list[ExtractionRecord]: List of extraction records for the extracts that were submitted and downloaded. Empty if nothing was missing and no new extracts were needed.
         """
         collection_dir = self.storage_dir / collection
         if force:

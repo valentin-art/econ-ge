@@ -113,7 +113,10 @@ def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:
         },
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    tmp_path.replace(out_path)
+
     return out_path
 
 

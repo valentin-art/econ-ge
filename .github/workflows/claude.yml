@@ -12,13 +12,6 @@ on:
       - '**/*.md'
       - '.github/**'
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  id-token: write
-
-
 concurrency:
   group: claude-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
