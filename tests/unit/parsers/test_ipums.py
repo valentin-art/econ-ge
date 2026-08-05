@@ -220,6 +220,92 @@ def test_parse_to_bronze_raises_on_empty_extract(tmp_path: Path) -> None:
         parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
 
 
+def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)  # 2005/2006/2007
+    bronze_dir = tmp_path / "bronze"
+    good_path = bronze_path(bronze_dir, "cps", 2005)
+    good_path.parent.mkdir(parents=True, exist_ok=True)
+    good_path.write_bytes(b"not-really-parquet-but-must-survive")
+    before = good_path.read_bytes()
+
+    calls = {"n": 0}
+    import src.parsers.ipums as ipums_mod
+
+    orig = ipums_mod.check_no_duplicate_columns
+
+    def flaky(df):
+        calls["n"] += 1
+        orig(df)
+        if calls["n"] == 2:
+            raise ValueError("boom")
+
+    monkeypatch.setattr(ipums_mod, "check_no_duplicate_columns", flaky)
+    with pytest.raises(ValueError, match="boom"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=2)
+
+    assert good_path.read_bytes() == before
+
+
+def test_merge_variables_into_bronze_raises_when_no_merge_columns_present(
+    tmp_path: Path,
+) -> None:
+    existing_ddi_path = tmp_path / "existing.xml"
+    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    existing_data_path = tmp_path / "existing.dat.gz"
+    existing_data_path.write_bytes(
+        gzip.compress(_EXISTING_DAT_TEXT.encode("iso-8859-1"))
+    )
+    bronze_dir = tmp_path / "bronze"
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
+
+    delta_ddi_path = tmp_path / "delta.xml"
+    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "delta.dat.gz"
+    delta_data_path.write_bytes(gzip.compress(_DELTA_DAT_TEXT.encode("iso-8859-1")))
+
+    with pytest.raises(RuntimeError, match="no columns in common"):
+        merge_variables_into_bronze(
+            delta_data_path,
+            delta_ddi_path,
+            "cps",
+            bronze_dir,
+            new_variables=["RACE"],
+            merge_keys=("SERIAL", "PERNUM"),  # absent from both fixtures
+        )
+
+
+# Same DDI as _DELTA_DDI_XML; both rows share MONTH=01 so they collide on
+# the effective merge key (YEAR, MONTH) once SERIAL/PERNUM are absent.
+_DUPLICATE_KEY_DELTA_DAT_TEXT = "2006011000000001100\n2006011000000002200\n"
+
+
+def test_merge_variables_into_bronze_raises_on_row_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    existing_ddi_path = tmp_path / "existing.xml"
+    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    existing_data_path = tmp_path / "existing.dat.gz"
+    existing_data_path.write_bytes(
+        gzip.compress(_EXISTING_DAT_TEXT.encode("iso-8859-1"))
+    )
+    bronze_dir = tmp_path / "bronze"
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
+
+    delta_ddi_path = tmp_path / "delta.xml"
+    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "delta.dat.gz"
+    delta_data_path.write_bytes(
+        gzip.compress(_DUPLICATE_KEY_DELTA_DAT_TEXT.encode("iso-8859-1"))
+    )
+
+    with pytest.raises(RuntimeError, match="changed the number of rows"):
+        merge_variables_into_bronze(
+            delta_data_path, delta_ddi_path, "cps", bronze_dir, new_variables=["RACE"]
+        )
+
+
 # DDI + data for the "already in bronze" extract: YEAR, MONTH, CPSIDP (merge
 # keys) plus SEX (an already-covered variable, mirrors what a prior
 # "new_samples" parse_to_bronze run would have produced).
