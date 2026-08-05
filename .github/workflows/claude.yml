@@ -81,14 +81,6 @@ jobs:
               - Silent branching / swallowed exceptions instead of explicit
                 assertions and diagnostic blocks
               - Correctness bugs, not style nits already covered by ruff/mypy
-
-              Categorize each finding by severity: Blocker | Major | Minor | Nit
-              Severety Guidance
-              - Blocker: Definite bug, security/safety flaw, data loss, or API break
-              - Major: Likely bug, large performance/memory issue, confusing API, flaky behavior
-              - Minor: Readability, small performance/style issues, incomplete doc/types
-              - Nit: Tiny consistency/style suggestions
-
               Post inline comments on the specific lines with issues. If
               nothing significant is found, post a short confirmation instead
               of listing minor style preferences.
