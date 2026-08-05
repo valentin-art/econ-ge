@@ -163,7 +163,7 @@ def test_parse_to_bronze_writes_parquet(tmp_path: Path) -> None:
     data_path, ddi_path = _write_fixture(tmp_path)
     bronze_dir = tmp_path / "bronze"
 
-    out_paths = parse_to_bronze(data_path, ddi_path, "cps", 27, bronze_dir)
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
 
     assert out_paths == [bronze_path(bronze_dir, "cps", 2006)]
     df = pd.read_parquet(out_paths[0])
@@ -193,7 +193,7 @@ def test_parse_to_bronze_splits_by_year_across_chunk_boundaries(
     data_path, ddi_path = _write_multi_year_fixture(tmp_path)
     bronze_dir = tmp_path / "bronze"
 
-    out_paths = parse_to_bronze(data_path, ddi_path, "cps", 27, bronze_dir, chunksize=2)
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=2)
 
     expected_paths = [
         bronze_path(bronze_dir, "cps", year) for year in (2005, 2006, 2007)
@@ -217,7 +217,7 @@ def test_parse_to_bronze_raises_on_empty_extract(tmp_path: Path) -> None:
     bronze_dir = tmp_path / "bronze"
 
     with pytest.raises(ValueError, match="no rows"):
-        parse_to_bronze(data_path, ddi_path, "cps", 27, bronze_dir)
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
 
 
 # DDI + data for the "already in bronze" extract: YEAR, MONTH, CPSIDP (merge
@@ -367,7 +367,7 @@ def test_merge_variables_into_bronze_attaches_new_column(tmp_path: Path) -> None
         gzip.compress(_EXISTING_DAT_TEXT.encode("iso-8859-1"))
     )
     bronze_dir = tmp_path / "bronze"
-    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", 30, bronze_dir)
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
 
     delta_ddi_path = tmp_path / "delta.xml"
     delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
