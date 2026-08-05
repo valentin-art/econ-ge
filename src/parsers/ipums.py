@@ -198,11 +198,12 @@ def parse_to_bronze(
                 f"Failed to close {len(errors)} ParquetWriter(s) - "
                 f"check for partial .tmp.parquet files in {bronze_dir}"
             ) from errors[0]
-        for year, (tmp_path, out_path) in out_paths.items():
-            tmp_path.rename(out_path)
 
     if total_rows == 0:
         raise ValueError("IPUMS extract has no rows")
+
+    for year, (tmp_path, out_path) in out_paths.items():
+        tmp_path.rename(out_path)
 
     return [out_paths[year][1] for year in sorted(out_paths)]
 
