@@ -7,7 +7,6 @@ codebook into a cleaned JSON variable dictionary (mirrors parsers.cps's
 import json
 import tempfile
 from pathlib import Path
-from typing import Tuple
 
 import pandas as pd
 import pyarrow as pa
@@ -168,7 +167,7 @@ def parse_to_bronze(
     )
 
     writers: dict[int, pq.ParquetWriter] = {}
-    out_paths: dict[int, Tuple[Path, Path]] = {}
+    out_paths: dict[int, tuple[Path, Path]] = {}
     total_rows = 0
     try:
         for chunk in iter_microdata:
