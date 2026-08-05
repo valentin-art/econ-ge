@@ -229,6 +229,7 @@ class IPUMSExtractor(Extractor):
         existing bronze columns instead of overwriting the whole file), and
         genuinely new samples as a "new_samples" force-pull - one or two
         extracts, mirroring extract(force=True) per group.
+        With force=True, two extracts may be submitted.
 
         Args:
             collection (str): IPUMS collection name, e.g. "cps" or "usa"
@@ -273,7 +274,10 @@ class IPUMSExtractor(Extractor):
                 )
                 for group_samples, request_kind in groups
             ]
-            save_coverage(build_coverage(collection_dir, collection), collection_dir)
+            if records:
+                save_coverage(
+                    build_coverage(collection_dir, collection), collection_dir
+                )
             return records
 
         coverage = build_coverage(collection_dir, collection)
