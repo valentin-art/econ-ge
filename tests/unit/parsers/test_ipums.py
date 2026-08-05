@@ -161,6 +161,24 @@ def test_save_variable_dictionary_logs_warning_on_drift(tmp_path: Path) -> None:
     assert identical_logs == []
 
 
+def test_save_variable_dictionary_force_overwrites_on_key_collision(
+    tmp_path: Path,
+) -> None:
+    save_variable_dictionary({"AGE": {"Description": "Age (old)"}}, tmp_path, 2006)
+
+    with structlog.testing.capture_logs() as logs:
+        save_variable_dictionary(
+            {"AGE": {"Description": "Age (new)"}}, tmp_path, 2006, force=True
+        )
+
+    merged = load_variable_dictionary(tmp_path, 2006)
+    assert merged["AGE"]["Description"] == "Age (new)"
+    # Still logged - force overwrites the definition, it doesn't hide that
+    # a drift happened.
+    assert [log["event"] for log in logs] == ["ipums_variable_definition_drift"]
+    assert logs[0]["overwritten"] is True
+
+
 def test_build_and_save_variable_dictionary(tmp_path: Path) -> None:
     _, ddi_path = _write_fixture(tmp_path)
 
@@ -571,6 +589,54 @@ def test_merge_variables_into_bronze_force_replaces_existing_column(
     # ...while every other existing column is untouched.
     pd.testing.assert_series_equal(before["YEAR"], after["YEAR"])
     pd.testing.assert_series_equal(before["MONTH"], after["MONTH"])
+
+
+# Same layout as _EXISTING_DAT_TEXT, plus a third row (CPSIDP 1000000003,
+# SEX=1) that the forced delta below deliberately does not cover - e.g. a
+# third sample/month sharing this year's bronze file that this particular
+# forced request isn't touching.
+_EXISTING_DAT_TEXT_3ROWS = "20060110000000011\n20060210000000022\n20060310000000031\n"
+# Forces SEX for CPSIDP 1000000001/1000000002 only (flipped values);
+# CPSIDP 1000000003 is absent from this extract entirely.
+_PARTIAL_FORCE_DELTA_DAT_TEXT = "20060110000000012\n20060210000000021\n"
+
+
+def test_merge_variables_into_bronze_force_does_not_clobber_rows_outside_delta(
+    tmp_path: Path,
+) -> None:
+    existing_ddi_path = tmp_path / "existing.xml"
+    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    existing_data_path = tmp_path / "existing.dat.gz"
+    existing_data_path.write_bytes(
+        gzip.compress(_EXISTING_DAT_TEXT_3ROWS.encode("iso-8859-1"))
+    )
+    bronze_dir = tmp_path / "bronze"
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
+
+    delta_ddi_path = tmp_path / "partial_force_delta.xml"
+    delta_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "partial_force_delta.dat.gz"
+    delta_data_path.write_bytes(
+        gzip.compress(_PARTIAL_FORCE_DELTA_DAT_TEXT.encode("iso-8859-1"))
+    )
+
+    updated_paths = merge_variables_into_bronze(
+        delta_data_path,
+        delta_ddi_path,
+        "cps",
+        bronze_dir,
+        new_variables=["SEX"],
+        force=True,
+    )
+
+    after = pd.read_parquet(updated_paths[0]).set_index("CPSIDP")
+    assert len(after) == 3  # no rows dropped
+    # Rows covered by the forced delta are replaced...
+    assert after.loc[1000000001, "SEX"] == 2
+    assert after.loc[1000000002, "SEX"] == 1
+    # ...but a row the forced delta doesn't mention keeps its prior value,
+    # rather than being wiped to NaN.
+    assert after.loc[1000000003, "SEX"] == 1
 
 
 def test_merge_variables_into_bronze_raises_when_bronze_year_missing(

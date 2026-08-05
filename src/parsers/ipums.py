@@ -61,6 +61,7 @@ def save_variable_dictionary(
     variable_dictionary: dict[str, dict[str, object]],
     dictionaries_dir: Path,
     year: int,
+    force: bool = False,
 ) -> Path:
     """Union `variable_dictionary` onto whatever's already saved for `year`
     and save - new variable keys are added, already-known keys are kept -
@@ -70,9 +71,13 @@ def save_variable_dictionary(
     merge_variables_into_bronze accumulates bronze columns rather than
     overwriting the file wholesale.
 
-    A colliding key whose value actually differs from what's on disk is left
-    untouched (old wins) but logged as drift - a variable's on-disk
-    definition should never change silently.
+    A colliding key whose value actually differs from what's on disk is
+    logged as drift either way. By default it's left untouched (old wins) -
+    a variable's on-disk definition should never change silently. With
+    force=True the new value wins instead, mirroring
+    merge_variables_into_bronze(force=True): a deliberate forced refresh
+    should be able to correct a bad prior definition, not just bad prior
+    bronze values.
     """
     out_path = variable_dictionary_path(dictionaries_dir, year)
     existing = (
@@ -87,8 +92,13 @@ def save_variable_dictionary(
                 variable=name,
                 old=old_entry,
                 new=new_entry,
+                overwritten=force,
             )
-    merged = {**variable_dictionary, **existing}  # old wins on collision
+    merged = (
+        {**existing, **variable_dictionary}
+        if force
+        else {**variable_dictionary, **existing}  # old wins on collision
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(merged, indent=2, sort_keys=True) + "\n",
@@ -110,6 +120,7 @@ def build_and_save_variable_dictionary(
     ddi_path: Path,
     dictionaries_dir: Path,
     years: list[int],
+    force: bool = False,
 ) -> list[Path]:
     """Build once from the DDI, save (merge) into every year in `years`.
 
@@ -120,7 +131,9 @@ def build_and_save_variable_dictionary(
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     variable_dictionary = build_variable_dictionary(ddi_codebook)
     return [
-        save_variable_dictionary(variable_dictionary, dictionaries_dir, year)
+        save_variable_dictionary(
+            variable_dictionary, dictionaries_dir, year, force=force
+        )
         for year in years
     ]
 
@@ -291,13 +304,23 @@ def merge_variables_into_bronze(
                 for v in new_variables
                 if v in staged_df.columns and (force or v not in existing_df.columns)
             ]
-            if force:
-                overlap = [v for v in add_columns if v in existing_df.columns]
-                if overlap:
-                    existing_df = existing_df.drop(columns=overlap)
-            merged = existing_df.merge(
-                staged_df[merge_columns + add_columns], on=merge_columns, how="left"
+            overlap_columns = (
+                [v for v in add_columns if v in existing_df.columns] if force else []
             )
+            new_columns = [v for v in add_columns if v not in overlap_columns]
+
+            merged = existing_df.merge(
+                staged_df[merge_columns + new_columns], on=merge_columns, how="left"
+            )
+            if overlap_columns:
+                # Overwrite in place via an indexed update rather than
+                # dropping + left-joining: a left-join would put NaN into
+                # any existing row whose merge key isn't in this (narrower,
+                # forced) staged extract - e.g. other samples/months sharing
+                # this same year's bronze file - instead of leaving it be.
+                merged = merged.set_index(merge_columns)
+                merged.update(staged_df.set_index(merge_columns)[overlap_columns])
+                merged = merged.reset_index()
             if len(merged) != len(existing_df):
                 raise RuntimeError(
                     f"Merging variable-delta extract for year {year} into "
