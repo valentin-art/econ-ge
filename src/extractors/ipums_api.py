@@ -180,6 +180,7 @@ class IPUMSExtractor(Extractor):
             "ddi_path": str(ddi_path),
             "cached": cached is not None,
             "request_kind": request_kind,
+            "force": force,
         }
         extraction_id = f"{collection}_{extract_id:05d}"
         record = build_extraction_record(
@@ -221,8 +222,14 @@ class IPUMSExtractor(Extractor):
             "variable_delta" extract (just the missing variables)
           - both -> one of each
 
-        `force=True` skips coverage-checking entirely and submits a single
-        fresh extract for exactly (samples, variables), like extract(force=True).
+        `force=True` skips the missing-variable/missing-sample diffing that
+        drives the non-forced path above, but still splits on known-vs-new
+        samples the same way: samples already in coverage are submitted as
+        a "variable_delta" force-pull (so the parse stage merges them onto
+        existing bronze columns instead of overwriting the whole file), and
+        genuinely new samples as a "new_samples" force-pull - one or two
+        extracts, mirroring extract(force=True) per group.
+        With force=True, two extracts may be submitted.
 
         Args:
             collection (str): IPUMS collection name, e.g. "cps" or "usa"
@@ -238,17 +245,40 @@ class IPUMSExtractor(Extractor):
         """
         collection_dir = self.storage_dir / collection
         if force:
-            record = self.extract(
-                collection=collection,
-                samples=samples,
-                variables=variables,
-                data_quality_flags=data_quality_flags,
-                data_structure=data_structure,
-                description=description,
-                force=True,
-            )
-            save_coverage(build_coverage(collection_dir, collection), collection_dir)
-            return [record]
+            coverage = build_coverage(collection_dir, collection)
+            # Force means "pull it regardless of whether plan_delta_requests
+            # would think it's needed" - but the request_kind label still
+            # has to match reality, or the parse stage routes a forced pull
+            # covering already-known samples through parse_to_bronze's
+            # full-file overwrite instead of a merge (silently dropping
+            # every other column already in that year's bronze file). Split
+            # into groups the same way plan_delta_requests's non-forced path
+            # already does, one extract() call per group actually present.
+            known_samples = [s for s in samples if s in coverage.samples]
+            new_samples = [s for s in samples if s not in coverage.samples]
+            groups: list[tuple[list[str], RequestKind]] = []
+            if new_samples:
+                groups.append((new_samples, "new_samples"))
+            if known_samples:
+                groups.append((known_samples, "variable_delta"))
+            records = [
+                self.extract(
+                    collection=collection,
+                    samples=group_samples,
+                    variables=variables,
+                    data_quality_flags=data_quality_flags,
+                    data_structure=data_structure,
+                    description=description,
+                    request_kind=request_kind,
+                    force=True,
+                )
+                for group_samples, request_kind in groups
+            ]
+            if records:
+                save_coverage(
+                    build_coverage(collection_dir, collection), collection_dir
+                )
+            return records
 
         coverage = build_coverage(collection_dir, collection)
         planned = plan_delta_requests(coverage, samples, variables)

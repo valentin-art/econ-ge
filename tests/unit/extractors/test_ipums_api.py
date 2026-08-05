@@ -308,8 +308,85 @@ def test_extract_incremental_force_bypasses_planning(tmp_path: Path) -> None:
 
     assert client.submit_calls == 1
     assert len(records) == 1
-    assert records[0].metadata["samples"] == ["cps2006_09s"]
-    assert records[0].metadata["variables"] == ["AGE"]
+    assert records[0].metadata["samples"] == ("cps2006_09s",)
+    assert records[0].metadata["variables"] == ("AGE",)
+    assert records[0].metadata["force"] is True
+    # cps2006_09s is already a known sample - forcing it is a re-pull of
+    # existing coverage, not a brand-new sample, so it's labeled accordingly.
+    assert records[0].metadata["request_kind"] == "variable_delta"
+
+
+def test_extract_incremental_force_labels_unknown_sample_as_new_samples(
+    tmp_path: Path,
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE", "SEX"])
+    client = _SequentialFakeClient(start_id=50)
+    extractor.client = client
+
+    records = extractor.extract_incremental(
+        collection="cps", samples=["cps2007_09s"], variables=["AGE"], force=True
+    )
+
+    assert records[0].metadata["request_kind"] == "new_samples"
+    assert records[0].metadata["force"] is True
+
+
+def test_extract_incremental_force_splits_mixed_known_and_new_samples(
+    tmp_path: Path,
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE", "SEX"])
+    client = _SequentialFakeClient(start_id=50)
+    extractor.client = client
+
+    # cps2006_09s is already known, cps2007_09s is not - a forced pull
+    # spanning both must not collapse to a single "new_samples" extract, or
+    # the parse stage would overwrite (not merge) 2006's existing columns.
+    records = extractor.extract_incremental(
+        collection="cps",
+        samples=["cps2006_09s", "cps2007_09s"],
+        variables=["AGE"],
+        force=True,
+    )
+
+    assert client.submit_calls == 2
+    assert len(records) == 2
+    by_kind = {r.metadata["request_kind"]: r for r in records}
+    assert set(by_kind) == {"new_samples", "variable_delta"}
+    assert by_kind["new_samples"].metadata["samples"] == ("cps2007_09s",)
+    assert by_kind["variable_delta"].metadata["samples"] == ("cps2006_09s",)
+    assert all(r.metadata["force"] is True for r in records)
+    assert (tmp_path / "cps" / "_COVERAGE.yaml").exists()
+
+
+def test_extract_records_force_in_metadata(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+
+    default_record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+    forced_record = extractor.extract(
+        collection="cps",
+        samples=["cps2007_09s"],
+        variables=["AGE"],
+        force=True,
+    )
+
+    assert default_record.metadata["force"] is False
+    assert forced_record.metadata["force"] is True
 
 
 # --- Real-API test: commented out on purpose, see module docstring. ---

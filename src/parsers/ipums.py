@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import structlog
 from ipumspy import readers
 from ipumspy.ddi import Codebook
 
@@ -19,6 +20,8 @@ from src.schemas.bronze.ipums_long import (
     check_no_duplicate_columns,
     validate_ipums_long,
 )
+
+log = structlog.get_logger(__name__)
 
 _NUMERIC_VARTYPES = {"numeric", "integer", "float"}
 
@@ -58,6 +61,7 @@ def save_variable_dictionary(
     variable_dictionary: dict[str, dict[str, object]],
     dictionaries_dir: Path,
     year: int,
+    force: bool = False,
 ) -> Path:
     """Union `variable_dictionary` onto whatever's already saved for `year`
     and save - new variable keys are added, already-known keys are kept -
@@ -66,12 +70,35 @@ def save_variable_dictionary(
     zero or more later "variable_delta" merges), the same way
     merge_variables_into_bronze accumulates bronze columns rather than
     overwriting the file wholesale.
+
+    A colliding key whose value actually differs from what's on disk is
+    logged as drift either way. By default it's left untouched (old wins) -
+    a variable's on-disk definition should never change silently. With
+    force=True the new value wins instead, mirroring
+    merge_variables_into_bronze(force=True): a deliberate forced refresh
+    should be able to correct a bad prior definition, not just bad prior
+    bronze values.
     """
     out_path = variable_dictionary_path(dictionaries_dir, year)
     existing = (
         load_variable_dictionary(dictionaries_dir, year) if out_path.exists() else {}
     )
-    merged = {**existing, **variable_dictionary}
+    for name, new_entry in variable_dictionary.items():
+        old_entry = existing.get(name)
+        if old_entry is not None and old_entry != new_entry:
+            log.warning(
+                "ipums_variable_definition_drift",
+                year=year,
+                variable=name,
+                old=old_entry,
+                new=new_entry,
+                overwritten=force,
+            )
+    merged = (
+        {**existing, **variable_dictionary}
+        if force
+        else {**variable_dictionary, **existing}  # old wins on collision
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(merged, indent=2, sort_keys=True) + "\n",
@@ -93,6 +120,7 @@ def build_and_save_variable_dictionary(
     ddi_path: Path,
     dictionaries_dir: Path,
     years: list[int],
+    force: bool = False,
 ) -> list[Path]:
     """Build once from the DDI, save (merge) into every year in `years`.
 
@@ -103,7 +131,9 @@ def build_and_save_variable_dictionary(
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     variable_dictionary = build_variable_dictionary(ddi_codebook)
     return [
-        save_variable_dictionary(variable_dictionary, dictionaries_dir, year)
+        save_variable_dictionary(
+            variable_dictionary, dictionaries_dir, year, force=force
+        )
         for year in years
     ]
 
@@ -215,6 +245,7 @@ def merge_variables_into_bronze(
     new_variables: list[str],
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
     chunksize: int = 100_000,
+    force: bool = False,
 ) -> list[Path]:
     """Merge a variable-delta extract (new_variables pulled for samples whose
     other variables are already in bronze) into the existing per-year bronze
@@ -227,6 +258,12 @@ def merge_variables_into_bronze(
     technical/weight variables that weren't actually requested, so they don't
     collide with what's already in bronze), left-joins onto the existing
     bronze file for that year, and overwrites it.
+
+    By default an already-present column in `new_variables` is left alone -
+    add_columns only ever adds columns bronze doesn't have yet. With
+    force=True, already-present columns in `new_variables` are instead
+    replaced with the staged extract's values for the rows it covers; every
+    other existing column is untouched.
 
     Raises RuntimeError if a staged year has no existing bronze file to merge
     into - that means the request this delta was planned from doesn't
@@ -265,10 +302,15 @@ def merge_variables_into_bronze(
             add_columns = [
                 v
                 for v in new_variables
-                if v in staged_df.columns and v not in existing_df.columns
+                if v in staged_df.columns and (force or v not in existing_df.columns)
             ]
+            overlap_columns = (
+                [v for v in add_columns if v in existing_df.columns] if force else []
+            )
+            new_columns = [v for v in add_columns if v not in overlap_columns]
+
             merged = existing_df.merge(
-                staged_df[merge_columns + add_columns], on=merge_columns, how="left"
+                staged_df[merge_columns + new_columns], on=merge_columns, how="left"
             )
             if len(merged) != len(existing_df):
                 raise RuntimeError(
@@ -278,6 +320,36 @@ def merge_variables_into_bronze(
                     f"should never happen, check merge_keys {merge_keys} and "
                     f"the staged extract's columns"
                 )
+            if overlap_columns:
+                # Overwrite in place via an indexed update rather than
+                # dropping + left-joining: a left-join would put NaN into
+                # any existing row whose merge key isn't in this (narrower,
+                # forced) staged extract - e.g. other samples/months sharing
+                # this same year's bronze file - instead of leaving it be.
+                # Row-count check above must run first: a duplicate merge
+                # key on the staged side makes update() raise pandas' own
+                # cryptic non-unique-index ValueError instead of this
+                # RuntimeError, if it runs before the count check does.
+                merged = merged.set_index(merge_columns)
+                staged_overlap = staged_df.set_index(merge_columns)[overlap_columns]
+                for column in overlap_columns:
+                    # Cast to the existing column's dtype explicitly rather
+                    # than let update() coerce it - pandas deprecated the
+                    # implicit coercion it used to do here (silently keeping
+                    # the old dtype) and will raise instead in a future
+                    # version once two independently-parsed extracts of the
+                    # same variable happen to disagree on dtype.
+                    if staged_overlap[column].dtype != merged[column].dtype:
+                        staged_overlap[column] = staged_overlap[column].astype(
+                            merged[column].dtype
+                        )
+                merged.loc[staged_overlap.index, overlap_columns] = staged_overlap
+                merged = merged.reset_index()
+            # Keep the existing file's column order regardless of which
+            # branch ran above - set_index()/reset_index() would otherwise
+            # move merge_columns to the front even when they weren't there
+            # originally.
+            merged = merged[[*existing_df.columns, *new_columns]]
             tmp_out_path = out_path.with_suffix(".tmp.parquet")
             write_parquet(merged, tmp_out_path)
             tmp_out_path.rename(out_path)
