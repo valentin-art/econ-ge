@@ -343,7 +343,7 @@ def merge_variables_into_bronze(
                         staged_overlap[column] = staged_overlap[column].astype(
                             merged[column].dtype
                         )
-                merged.update(staged_overlap)
+                merged.loc[staged_overlap.index, overlap_columns] = staged_overlap
                 merged = merged.reset_index()
             # Keep the existing file's column order regardless of which
             # branch ran above - set_index()/reset_index() would otherwise
