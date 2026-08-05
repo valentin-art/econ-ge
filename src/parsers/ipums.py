@@ -214,7 +214,7 @@ def merge_variables_into_bronze(
     bronze_dir: Path,
     new_variables: list[str],
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
-    chunksize: int = 1_000_000,
+    chunksize: int = 100_000,
 ) -> list[Path]:
     """Merge a variable-delta extract (new_variables pulled for samples whose
     other variables are already in bronze) into the existing per-year bronze
@@ -278,7 +278,9 @@ def merge_variables_into_bronze(
                     f"should never happen, check merge_keys {merge_keys} and "
                     f"the staged extract's columns"
                 )
-            write_parquet(merged, out_path)
+            tmp_out_path = out_path.with_suffix(".tmp.parquet")
+            write_parquet(merged, tmp_out_path)
+            tmp_out_path.rename(out_path)
             updated_paths.append(out_path)
 
     return updated_paths
