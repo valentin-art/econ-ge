@@ -312,15 +312,6 @@ def merge_variables_into_bronze(
             merged = existing_df.merge(
                 staged_df[merge_columns + new_columns], on=merge_columns, how="left"
             )
-            if overlap_columns:
-                # Overwrite in place via an indexed update rather than
-                # dropping + left-joining: a left-join would put NaN into
-                # any existing row whose merge key isn't in this (narrower,
-                # forced) staged extract - e.g. other samples/months sharing
-                # this same year's bronze file - instead of leaving it be.
-                merged = merged.set_index(merge_columns)
-                merged.update(staged_df.set_index(merge_columns)[overlap_columns])
-                merged = merged.reset_index()
             if len(merged) != len(existing_df):
                 raise RuntimeError(
                     f"Merging variable-delta extract for year {year} into "
@@ -329,6 +320,36 @@ def merge_variables_into_bronze(
                     f"should never happen, check merge_keys {merge_keys} and "
                     f"the staged extract's columns"
                 )
+            if overlap_columns:
+                # Overwrite in place via an indexed update rather than
+                # dropping + left-joining: a left-join would put NaN into
+                # any existing row whose merge key isn't in this (narrower,
+                # forced) staged extract - e.g. other samples/months sharing
+                # this same year's bronze file - instead of leaving it be.
+                # Row-count check above must run first: a duplicate merge
+                # key on the staged side makes update() raise pandas' own
+                # cryptic non-unique-index ValueError instead of this
+                # RuntimeError, if it runs before the count check does.
+                merged = merged.set_index(merge_columns)
+                staged_overlap = staged_df.set_index(merge_columns)[overlap_columns]
+                for column in overlap_columns:
+                    # Cast to the existing column's dtype explicitly rather
+                    # than let update() coerce it - pandas deprecated the
+                    # implicit coercion it used to do here (silently keeping
+                    # the old dtype) and will raise instead in a future
+                    # version once two independently-parsed extracts of the
+                    # same variable happen to disagree on dtype.
+                    if staged_overlap[column].dtype != merged[column].dtype:
+                        staged_overlap[column] = staged_overlap[column].astype(
+                            merged[column].dtype
+                        )
+                merged.update(staged_overlap)
+                merged = merged.reset_index()
+            # Keep the existing file's column order regardless of which
+            # branch ran above - set_index()/reset_index() would otherwise
+            # move merge_columns to the front even when they weren't there
+            # originally.
+            merged = merged[[*existing_df.columns, *new_columns]]
             tmp_out_path = out_path.with_suffix(".tmp.parquet")
             write_parquet(merged, tmp_out_path)
             tmp_out_path.rename(out_path)
