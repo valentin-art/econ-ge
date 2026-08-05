@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import structlog
 from ipumspy import readers
 from ipumspy.ddi import Codebook
 
@@ -19,6 +20,8 @@ from src.schemas.bronze.ipums_long import (
     check_no_duplicate_columns,
     validate_ipums_long,
 )
+
+log = structlog.get_logger(__name__)
 
 _NUMERIC_VARTYPES = {"numeric", "integer", "float"}
 
@@ -66,12 +69,26 @@ def save_variable_dictionary(
     zero or more later "variable_delta" merges), the same way
     merge_variables_into_bronze accumulates bronze columns rather than
     overwriting the file wholesale.
+
+    A colliding key whose value actually differs from what's on disk is left
+    untouched (old wins) but logged as drift - a variable's on-disk
+    definition should never change silently.
     """
     out_path = variable_dictionary_path(dictionaries_dir, year)
     existing = (
         load_variable_dictionary(dictionaries_dir, year) if out_path.exists() else {}
     )
-    merged = {**existing, **variable_dictionary}
+    for name, new_entry in variable_dictionary.items():
+        old_entry = existing.get(name)
+        if old_entry is not None and old_entry != new_entry:
+            log.warning(
+                "ipums_variable_definition_drift",
+                year=year,
+                variable=name,
+                old=old_entry,
+                new=new_entry,
+            )
+    merged = {**variable_dictionary, **existing}  # old wins on collision
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(merged, indent=2, sort_keys=True) + "\n",
@@ -215,6 +232,7 @@ def merge_variables_into_bronze(
     new_variables: list[str],
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
     chunksize: int = 100_000,
+    force: bool = False,
 ) -> list[Path]:
     """Merge a variable-delta extract (new_variables pulled for samples whose
     other variables are already in bronze) into the existing per-year bronze
@@ -227,6 +245,12 @@ def merge_variables_into_bronze(
     technical/weight variables that weren't actually requested, so they don't
     collide with what's already in bronze), left-joins onto the existing
     bronze file for that year, and overwrites it.
+
+    By default an already-present column in `new_variables` is left alone -
+    add_columns only ever adds columns bronze doesn't have yet. With
+    force=True, already-present columns in `new_variables` are instead
+    replaced with the staged extract's values for the rows it covers; every
+    other existing column is untouched.
 
     Raises RuntimeError if a staged year has no existing bronze file to merge
     into - that means the request this delta was planned from doesn't
@@ -265,8 +289,12 @@ def merge_variables_into_bronze(
             add_columns = [
                 v
                 for v in new_variables
-                if v in staged_df.columns and v not in existing_df.columns
+                if v in staged_df.columns and (force or v not in existing_df.columns)
             ]
+            if force:
+                overlap = [v for v in add_columns if v in existing_df.columns]
+                if overlap:
+                    existing_df = existing_df.drop(columns=overlap)
             merged = existing_df.merge(
                 staged_df[merge_columns + add_columns], on=merge_columns, how="left"
             )

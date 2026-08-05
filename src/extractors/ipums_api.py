@@ -180,6 +180,7 @@ class IPUMSExtractor(Extractor):
             "ddi_path": str(ddi_path),
             "cached": cached is not None,
             "request_kind": request_kind,
+            "force": force,
         }
         extraction_id = f"{collection}_{extract_id:05d}"
         record = build_extraction_record(
@@ -238,6 +239,21 @@ class IPUMSExtractor(Extractor):
         """
         collection_dir = self.storage_dir / collection
         if force:
+            coverage = build_coverage(collection_dir, collection)
+            # Force means "pull it regardless of whether plan_delta_requests
+            # would think it's needed" - if fully covered already,
+            # plan_delta_requests returns [], but we still want *a*
+            # request_kind label. Treat "every sample already known" as
+            # variable_delta, else new_samples - matching what
+            # plan_delta_requests would have called it had it not
+            # short-circuited. A request mixing already-known and brand-new
+            # samples is simplified to whichever label applies to the whole
+            # batch rather than split like the non-forced path does below.
+            request_kind: RequestKind = (
+                "variable_delta"
+                if all(sample in coverage.samples for sample in samples)
+                else "new_samples"
+            )
             record = self.extract(
                 collection=collection,
                 samples=samples,
@@ -245,6 +261,7 @@ class IPUMSExtractor(Extractor):
                 data_quality_flags=data_quality_flags,
                 data_structure=data_structure,
                 description=description,
+                request_kind=request_kind,
                 force=True,
             )
             save_coverage(build_coverage(collection_dir, collection), collection_dir)
