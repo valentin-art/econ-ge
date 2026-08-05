@@ -7,6 +7,7 @@ codebook into a cleaned JSON variable dictionary (mirrors parsers.cps's
 import json
 import tempfile
 from pathlib import Path
+from typing import Tuple
 
 import pandas as pd
 import pyarrow as pa
@@ -129,17 +130,14 @@ def bronze_coverage(dictionaries_dir: Path) -> dict[int, set[str]]:
     return coverage
 
 
-def parse_ipums_extract(data_path: Path, ddi_path: Path) -> pd.DataFrame:
+def parse_ipums_extract(
+    data_path: Path, ddi_path: Path, chunksize: int = 100_000
+) -> pd.DataFrame:
     """Parse one raw IPUMS extract (.dat.gz + DDI .xml) into a tidy DataFrame."""
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     iter_microdata = readers.read_microdata_chunked(
-        ddi_codebook, data_path, chunksize=1000000
+        ddi_codebook, data_path, chunksize=chunksize
     )
-    # i = 0
-    # for df in iter_microdata:
-    #     i = i + 1
-    #     print(i)
-    # print("end")
     df = pd.concat([df for df in iter_microdata])
     return validate_ipums_long(df)
 
@@ -153,9 +151,8 @@ def parse_to_bronze(
     data_path: Path,
     ddi_path: Path,
     collection: str,
-    extract_id: int,
     bronze_dir: Path,
-    chunksize: int = 1_000_000,
+    chunksize: int = 100_000,
 ) -> list[Path]:
     """Stream-parse one raw IPUMS extract straight to bronze parquet, split by
     YEAR, without ever holding the full extract in memory.
@@ -171,7 +168,7 @@ def parse_to_bronze(
     )
 
     writers: dict[int, pq.ParquetWriter] = {}
-    out_paths: dict[int, Path] = {}
+    out_paths: dict[int, Tuple[Path, Path]] = {}
     total_rows = 0
     try:
         for chunk in iter_microdata:
@@ -180,22 +177,34 @@ def parse_to_bronze(
                 continue
             total_rows += len(chunk)
             for year, year_df in chunk.groupby("YEAR"):
-                year = int(year)  # type: ignore
+                year = int(year)  # type: ignore[arg-type]
                 table = pa.Table.from_pandas(year_df, preserve_index=False)
                 if year not in writers:
                     out_path = bronze_path(bronze_dir, collection, year)
                     out_path.parent.mkdir(parents=True, exist_ok=True)
-                    writers[year] = pq.ParquetWriter(out_path, table.schema)
-                    out_paths[year] = out_path
+                    tmp_path = out_path.with_suffix(".tmp.parquet")
+                    writers[year] = pq.ParquetWriter(tmp_path, table.schema)
+                    out_paths[year] = (tmp_path, out_path)
                 writers[year].write_table(table)
     finally:
+        errors = []
         for writer in writers.values():
-            writer.close()
+            try:
+                writer.close()
+            except Exception as e:
+                errors.append(e)
+        if errors:
+            raise RuntimeError(
+                f"Failed to close {len(errors)} ParquetWriter(s) - "
+                f"check for partial .tmp.parquet files in {bronze_dir}"
+            ) from errors[0]
+        for year, (tmp_path, out_path) in out_paths.items():
+            tmp_path.rename(out_path)
 
     if total_rows == 0:
         raise ValueError("IPUMS extract has no rows")
 
-    return [out_paths[year] for year in sorted(out_paths)]
+    return [out_paths[year][1] for year in sorted(out_paths)]
 
 
 def merge_variables_into_bronze(
@@ -230,12 +239,11 @@ def merge_variables_into_bronze(
             data_path,
             ddi_path,
             collection,
-            extract_id=0,
             bronze_dir=staging_dir,
             chunksize=chunksize,
         )
 
-        updated_paths = []
+        updated_paths: list[Path] = []
         for staged_path in staged_paths:
             year = int(staged_path.stem)
             out_path = bronze_path(bronze_dir, collection, year)
@@ -248,6 +256,12 @@ def merge_variables_into_bronze(
             staged_df = pd.read_parquet(staged_path)
             existing_df = pd.read_parquet(out_path)
             merge_columns = [k for k in merge_keys if k in staged_df.columns]
+            if not merge_columns:
+                raise RuntimeError(
+                    f"Staged variable-delta extract for year {year} has no "
+                    f"columns in common with merge_keys {merge_keys} - cannot "
+                    f"merge into existing bronze file {out_path}"
+                )
             add_columns = [
                 v
                 for v in new_variables
@@ -256,6 +270,14 @@ def merge_variables_into_bronze(
             merged = existing_df.merge(
                 staged_df[merge_columns + add_columns], on=merge_columns, how="left"
             )
+            if len(merged) != len(existing_df):
+                raise RuntimeError(
+                    f"Merging variable-delta extract for year {year} into "
+                    f"existing bronze file {out_path} changed the number of "
+                    f"rows from {len(existing_df)} to {len(merged)} - this "
+                    f"should never happen, check merge_keys {merge_keys} and "
+                    f"the staged extract's columns"
+                )
             write_parquet(merged, out_path)
             updated_paths.append(out_path)
 
