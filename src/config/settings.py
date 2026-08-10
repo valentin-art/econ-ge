@@ -70,6 +70,13 @@ class DataPaths(BaseSettings):
 
 class Settings(BaseSettings):
     paths: DataPaths = DataPaths()
+    # Sibling of data/, not nested under DataPaths - holds versioned YAML +
+    # crosswalk config for the src/cleaning/ methodology layer
+    # (CleaningContext.from_config), not raw/bronze/silver data.
+    cleaning_config_root: Path = Field(
+        default=Path.home() / "projects/econ-ge/config/cleaning",
+        alias="CLEANING_CONFIG_ROOT",
+    )
     bea_api_key: str = Field(default="", alias="BEA_API_KEY")
     ipums_api_key: str = Field(default="", alias="IPUMS_API_KEY")
     cps_mw_base_url: str = Field(
