@@ -38,10 +38,25 @@ def find_matching_extract(
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
 ) -> tuple[Path, Path, int] | None:
-    """Return (data_path, ddi_path, extract_id) for the most recent manifest
-    entry in `collection_dir` whose samples exactly match `samples` and whose
-    variables are a superset of `variables`, provided its data file and DDI
-    codebook both still exist on disk. The data_structure and data_quality_flags must also match. Returns None if no such entry exists.
+    """Compares the requested (samples, variables) against the manifest entries
+    (as function arguments) in given collection.
+
+    Args:
+        collection_dir (Path): Path to the collection's dir containing _MANIFEST.yaml
+        samples (Sequence[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
+        variables (Sequence[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
+        data_structure (dict[str, dict[str, str]]): A form of data pulled:
+            Hierarchical or rectangular data
+        data_quality_flags (bool): Whether to pull IPUMS Data quality flags
+
+    Returns:
+        tuple[Path, Path, int] | None: (data_path, ddi_path, extract_id) for
+        the most recent manifest entry in `collection_dir` such that:
+            - samples exactly match `samples`
+            - variables are a superset of `variables`
+            - Data file and DDI codebook both still exist on disk
+            - The data_structure and data_quality_flags must also match
+        None if no such entry exists.
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
