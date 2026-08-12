@@ -20,7 +20,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -35,7 +35,7 @@ logger = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class StepReport:
-    """What one Step did to one DataFrame, for provenance and debugging."""
+    """What one Step did to one DataFrame. Needs for debugging."""
 
     step_name: str
     n_in: int
@@ -66,14 +66,20 @@ class Step(ABC):
     does not produce
 
     Attributes:
-        requred_columns (frozenset[str]) : helps to validate step input
-        produced_columns (frozenset[str]) : helps to validate step output
-        is_idempotent (bool) : ensure the step applies once.
+        requred_columns (frozenset[str]):
+            Helps to validate step input.
+        produced_columns (frozenset[str]):
+            Helps to validate step output
+        is_idempotent (bool) :
+            Ensures the step applies once.
 
     Methods:
         apply(df, context):
             Use context (cleaning definition) to apply the cleaning step
             to the dataset.
+        validate_context(context):
+            Static check: does `context` actually have what this step will
+            need at `apply()` time (e.g. a named sub-context entry)?
     """
 
     required_columns: frozenset[str] = frozenset()
@@ -89,6 +95,12 @@ class Step(ABC):
     ) -> tuple[pl.DataFrame, StepReport]:
         """Pure function of (df, context): no side effects, no state mutation."""
         ...
+
+    def validate_context(self, context: CleaningContext) -> list[str]:
+        """Returns issues if this step's dependencies are missing
+        from `context`. Empty means nothing to report.
+        """
+        return []
 
 
 class NoOpStep(Step):
@@ -162,7 +174,10 @@ class Pipeline:
         Raise:
             ValueError if config file has unknown or invalid steps.
         """
+        # Laod config file
         raw = yaml.safe_load(config_path.read_text()) or {}
+
+        # Determine steps: name, type, parameters
         steps: list[Step] = []
         for block in raw.get("steps", []):
             block = dict(block)
@@ -191,15 +206,16 @@ class Pipeline:
         )
 
     def validate_compatibility(self) -> list[str]:
-        """Static check: is each step's required_columns satisfied by
-        `known_input_columns` plus the columns produced by every earlier
-        step?
+        """Is each step's required_columns satisfied by `known_input_columns`
+        plus the columns produced by every earlier step?
 
         Returns a list of human-readable issues; empty means no static
         incompatibility was found.
         """
         issues: list[str] = []
         available: set[str] = set(self.known_input_columns)
+
+        # Missing are required minus available on each step
         for index, step in enumerate(self.steps):
             missing = step.required_columns - available
             if missing:
@@ -214,7 +230,7 @@ class Pipeline:
     def apply(
         self, df: pl.DataFrame, context: CleaningContext
     ) -> tuple[pl.DataFrame, RunReport]:
-        started_at = datetime.now()
+        started_at = datetime.now(tz=UTC)
         reports: list[StepReport] = []
         current = df
         for step in self.steps:
@@ -225,12 +241,14 @@ class Pipeline:
                     f"{sorted(missing)}, not present in the input frame "
                     f"(columns: {sorted(current.columns)})"
                 )
-            step_started = datetime.now()
+            step_started = datetime.now(tz=UTC)
             current, report = step.apply(current, context)
             if report.duration_seconds is None:
                 report = replace(
                     report,
-                    duration_seconds=(datetime.now() - step_started).total_seconds(),
+                    duration_seconds=(
+                        datetime.now(tz=UTC) - step_started
+                    ).total_seconds(),
                 )
             if self.validate_between_steps:
                 produced_missing = step.produced_columns - set(current.columns)
@@ -253,7 +271,7 @@ class Pipeline:
                 n_in=report.n_in,
                 n_out=report.n_out,
             )
-        finished_at = datetime.now()
+        finished_at = datetime.now(tz=UTC)
         run_report = RunReport(
             pipeline_name=self.name,
             steps=reports,
