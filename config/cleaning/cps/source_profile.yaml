@@ -1,0 +1,7 @@
+kind: ipums_cps_asec
+available_flags:
+  - QINCWAGE
+notes: >
+  IPUMS CPS ASEC bronze source. Class-of-worker (CLASSWLY), demographic
+  (AGE, SEX, RACE), and weeks-worked (WKSWORK1/WKSWORK2) coding is
+  harmonized by IPUMS across 1962-2025.

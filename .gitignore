@@ -216,7 +216,13 @@ __marimo__/
 
 data/
 src/parsers/dictionaries/
-.claude/
+
+# .claude/: track the shared review rubric + agent definitions so CI and other
+# clones get them; keep per-machine settings and local state ignored.
+.claude/*
+!.claude/agents/
+!.claude/review_code.prompt.md
+.claude/settings.local.json
 
 .dagster_home/
 dbt/dbt_packages/
@@ -235,3 +241,5 @@ dbt/logs/
 
 # dagster
 .dagster_home/
+aa_clean/
+cps_clean/

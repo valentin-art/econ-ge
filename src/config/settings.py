@@ -13,6 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #  - Never overrides variables already set in the real environment.
 load_dotenv()
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 class DataPaths(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DATA_")
@@ -70,6 +72,13 @@ class DataPaths(BaseSettings):
 
 class Settings(BaseSettings):
     paths: DataPaths = DataPaths()
+    # Sibling of data/, not nested under DataPaths - holds versioned YAML +
+    # crosswalk config for the src/cleaning/ methodology layer
+    # (CleaningContext.from_config), not raw/bronze/silver data.
+    cleaning_config_root: Path = Field(
+        default=_REPO_ROOT / "config" / "cleaning",
+        alias="CLEANING_CONFIG_ROOT",
+    )
     bea_api_key: str = Field(default="", alias="BEA_API_KEY")
     ipums_api_key: str = Field(default="", alias="IPUMS_API_KEY")
     cps_mw_base_url: str = Field(

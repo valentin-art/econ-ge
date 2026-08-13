@@ -1,0 +1,305 @@
+"""Step/Pipeline/report contracts for the CPS (and future PSID/other-source)
+data-cleaning layer.
+
+Classes:
+    Pipeline:
+        implements cleaning pipleline as a sequence of steps.
+    Step:
+        Individual steps (wrapper for a cleaning function).
+    NoOpStep:
+        Empty step example.
+    StepReport:
+        logs info about cleaning on an individual step.
+    RunReport:
+        Wraps StepReports over full cleaning pipeline.
+
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import ClassVar
+
+import polars as pl
+import structlog
+import yaml
+
+from src.cleaning.context import CleaningContext
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class StepReport:
+    """What one Step did to one DataFrame. Needs for debugging."""
+
+    step_name: str
+    n_in: int
+    n_out: int
+    dropped_reason_counts: dict[str, int] = field(default_factory=dict)
+    branches_taken: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    duration_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class RunReport:
+    """Contains a summary report from all Steps of a Pipeline."""
+
+    pipeline_name: str
+    steps: list[StepReport]
+    context_hash: str
+    started_at: datetime
+    finished_at: datetime
+    pipeline_hash: str | None = None
+
+
+class Step(ABC):
+    """Atomic cleaning step, e.g. an age-band restriction
+    or a topcode adjustment.
+
+    `requred_columns` and `produced_columns` are used to validate
+    step inputs and outputs. `is_idempotent` ensures the step
+    does not produce
+
+    Attributes:
+        requred_columns (frozenset[str]):
+            Helps to validate step input.
+        produced_columns (frozenset[str]):
+            Helps to validate step output
+        is_idempotent (bool) :
+            Ensures the step applies once.
+
+    Methods:
+        apply(df, context):
+            Use context (cleaning definition) to apply the cleaning step
+            to the dataset.
+        validate_context(context):
+            Static check: does `context` actually have what this step will
+            need at `apply()` time (e.g. a named sub-context entry)?
+    """
+
+    required_columns: frozenset[str] = frozenset()
+    produced_columns: frozenset[str] = frozenset()
+    is_idempotent: ClassVar[bool] = True
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @abstractmethod
+    def apply(
+        self, df: pl.DataFrame, context: CleaningContext
+    ) -> tuple[pl.DataFrame, StepReport]:
+        """Pure function of (df, context): no side effects, no state mutation."""
+        ...
+
+    def validate_context(self, context: CleaningContext) -> list[str]:
+        """Returns issues if this step's dependencies are missing
+        from `context`. Empty means nothing to report.
+        """
+        return []
+
+
+class NoOpStep(Step):
+    """Trivial pass-through step. Exists only for test purpose."""
+
+    def apply(
+        self, df: pl.DataFrame, context: CleaningContext
+    ) -> tuple[pl.DataFrame, StepReport]:
+        return df, StepReport(step_name=self.name, n_in=len(df), n_out=len(df))
+
+
+class Pipeline:
+    """Linear composition of Steps.
+
+    Attributes:
+        steps (list[Step]) :
+            A list of Steps (applied in the defined order)
+        name (str):
+            Name of the pipeline (e.g., may identify dataset/project)
+        validate_between_steps (bool):
+            A flag whether validate required/produced columns of each step,
+            as well as steps consistency
+        known_unput_columns (frozenset[str]):
+            Used to check whether sets have all columns required to complete
+            the Pipeline.
+
+    Methods:
+        from_config(...):
+            Opens the Pipepline (i.e., all Steps with definitions) from
+            a config (yaml) file. Checks that all Steps are defined and can
+            be initialized.
+        validate_compatibility(...):
+            Checks all requred and produced columns are compatible on each
+            step.
+        apply(...):
+            Applies steps one-by-one, returns cleaned dataset and cleanin
+            report.
+    """
+
+    def __init__(
+        self,
+        steps: list[Step],
+        name: str,
+        validate_between_steps: bool = False,
+        known_input_columns: frozenset[str] = frozenset(),
+    ) -> None:
+        self.steps = steps
+        self.name = name
+        self.validate_between_steps = validate_between_steps
+        self.known_input_columns = known_input_columns
+
+    @classmethod
+    def from_config(
+        cls, config_path: Path, registry: Mapping[str, Callable[..., Step]]
+    ) -> Pipeline:
+        """Build a Pipeline from a YAML file: `name`, `known_input_columns`,
+        `validate_between_steps`, and a `steps` list of blocks, each
+        `{type: <registry key>, name: <step name>, ...constructor kwargs}`.
+
+        Args:
+            config_path (Path):
+                A path to yaml-file that contains full information about pipeline
+                steps.
+            registry (Mapping[...]):
+                A mapping between Step types in config file and known steps that
+                can be initialized.
+
+        Returns:
+            Pipeline
+
+        Raise:
+            ValueError if config file has unknown or invalid steps.
+        """
+        # Laod config file
+        raw = yaml.safe_load(config_path.read_text()) or {}
+
+        known_keys = {"name", "steps", "validate_between_steps", "known_input_columns"}
+        unknown = set(raw) - known_keys
+        if unknown:
+            raise ValueError(
+                f"Pipeline.from_config: {config_path} has unknown top-level keys "
+                f"{sorted(unknown)}; expected {sorted(known_keys)}"
+            )
+
+        steps: list[Step] = []
+        seen_names: set[str] = set()
+        for position, block in enumerate(raw.get("steps") or []):
+            if not isinstance(block, Mapping):
+                raise TypeError(
+                    f"Pipeline.from_config: {config_path} step #{position} is "
+                    f"{type(block).__name__}, expected a mapping of "
+                    "{type: ..., name: ..., **kwargs}"
+                )
+            block = dict(block)
+            type_name = block.pop("type", None)
+            step_name = block.get("name", f"<unnamed #{position}>")
+            if step_name in seen_names:
+                raise ValueError(
+                    f"Pipeline.from_config: {config_path} has duplicate step name "
+                    f"{step_name!r}; names must be unique within a pipeline"
+                )
+            seen_names.add(step_name)
+
+            step_name = block.get("name", "<unnamed>")
+            builder = registry.get(type_name)
+            if builder is None:
+                raise ValueError(
+                    f"Pipeline.from_config: {config_path} step {step_name!r} "
+                    f"has unknown type {type_name!r}; available: "
+                    f"{sorted(registry)}"
+                )
+            try:
+                steps.append(builder(**block))
+            except TypeError as exc:
+                raise ValueError(
+                    f"Pipeline.from_config: {config_path} step {step_name!r} "
+                    f"(type={type_name!r}) failed to construct: {exc}"
+                ) from exc
+
+        return cls(
+            steps=steps,
+            name=raw.get("name", config_path.stem),
+            validate_between_steps=raw.get("validate_between_steps", False),
+            known_input_columns=frozenset(raw.get("known_input_columns", [])),
+        )
+
+    def validate_compatibility(self) -> list[str]:
+        """Is each step's required_columns satisfied by `known_input_columns`
+        plus the columns produced by every earlier step?
+
+        Returns a list of human-readable issues; empty means no static
+        incompatibility was found.
+        """
+        issues: list[str] = []
+        available: set[str] = set(self.known_input_columns)
+
+        # Missing are required minus available on each step
+        for index, step in enumerate(self.steps):
+            missing = step.required_columns - available
+            if missing:
+                issues.append(
+                    f"step {index} ({step.name!r}) requires {sorted(missing)}, "
+                    f"not in known_input_columns or produced by any earlier "
+                    f"step in pipeline {self.name!r}"
+                )
+            available |= step.produced_columns
+        return issues
+
+    def apply(
+        self, df: pl.DataFrame, context: CleaningContext
+    ) -> tuple[pl.DataFrame, RunReport]:
+        started_at = datetime.now(tz=UTC)
+        reports: list[StepReport] = []
+        current = df
+        for step in self.steps:
+            missing = step.required_columns - set(current.columns)
+            if missing:
+                raise ValueError(
+                    f"step {step.name!r} in pipeline {self.name!r} requires columns "
+                    f"{sorted(missing)}, not present in the input frame "
+                    f"(columns: {sorted(current.columns)})"
+                )
+            step_started = datetime.now(tz=UTC)
+            current, report = step.apply(current, context)
+            if report.duration_seconds is None:
+                report = replace(
+                    report,
+                    duration_seconds=(
+                        datetime.now(tz=UTC) - step_started
+                    ).total_seconds(),
+                )
+            if self.validate_between_steps:
+                produced_missing = step.produced_columns - set(current.columns)
+                if produced_missing:
+                    raise ValueError(
+                        f"step {step.name!r} declared produced_columns "
+                        f"{sorted(step.produced_columns)} but {sorted(produced_missing)} "
+                        "are missing from its output"
+                    )
+                if len(current) != report.n_out:
+                    raise ValueError(
+                        f"step {step.name!r} reported n_out={report.n_out} but "
+                        f"returned a frame with {len(current)} rows"
+                    )
+            reports.append(report)
+            logger.info(
+                "cleaning_step_applied",
+                pipeline=self.name,
+                step=step.name,
+                n_in=report.n_in,
+                n_out=report.n_out,
+            )
+        finished_at = datetime.now(tz=UTC)
+        run_report = RunReport(
+            pipeline_name=self.name,
+            steps=reports,
+            context_hash=context.compute_hash(),
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        return current, run_report

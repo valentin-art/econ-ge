@@ -4,7 +4,7 @@ Index: Year. One row per year — nominal/real capital, rental price,
 investment and output-value series for the IT / non-IT capital buckets
 (Hall-Jorgenson framework). Field `description=` is the single source of
 truth for the short-name -> full-name mapping written alongside the parquet
-output; see docs/data/silver/bea/README.md for the derivations.
+output; see docs/bea_silver_derivations.md for the derivations.
 """
 
 import pandas as pd

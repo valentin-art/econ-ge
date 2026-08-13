@@ -1,0 +1,18 @@
+name: cps_universe_and_topcode
+known_input_columns: [AGE, CLASSWLY, YEAR, WKSWORK1, WKSWORK2, FEMALE, RACE]
+validate_between_steps: true
+steps:
+  - name: age_band_filter
+    type: BandFilter
+    column: AGE
+    min_value: 16
+
+  - name: wage_or_self_employed_filter
+    type: MembershipFilter
+    column: CLASSWLY
+    allowed_values: [20, 22, 24, 25, 27, 28, 10, 13, 14]
+
+  - name: age_topcode
+    type: TopcodeCapStep
+    column: AGE
+    ceiling: 90
