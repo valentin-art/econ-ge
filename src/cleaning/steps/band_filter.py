@@ -17,6 +17,15 @@ class BandFilter(Step):
         max_value: float | None = None,
     ) -> None:
         super().__init__(name)
+        if min_value is None and max_value is None:
+            raise ValueError(
+                f"BandFilter {name!r}: at least one of min_value/max_value must be set"
+            )
+        if min_value is not None and max_value is not None and min_value > max_value:
+            raise ValueError(
+                f"BandFilter {name!r}: min_value={min_value} > max_value={max_value}; "
+                "this would drop every row"
+            )
         self.column = column
         self.min_value = min_value
         self.max_value = max_value
