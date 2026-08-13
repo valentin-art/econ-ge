@@ -43,8 +43,9 @@ class SourceProfile(BaseModel):
             Any other notes for logs.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     kind: SourceKind
+    available_flags: frozenset[str] = frozenset()
     notes: str = ""
 
 
@@ -52,7 +53,7 @@ class RunMetadata(BaseModel):
     """Per-run bookkeeping for logs."""
 
     # Configure as immutable
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -77,7 +78,7 @@ class CleaningContext(BaseModel):
     """
 
     # Configure as immutable
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_profile: SourceProfile
     run_metadata: RunMetadata = Field(default_factory=RunMetadata)
