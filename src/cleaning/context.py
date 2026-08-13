@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 SourceKind = Literal["ipums_cps_asec", "nber_mw", "raw_asec_march", "psid"]
 
@@ -125,7 +125,7 @@ class CleaningContext(BaseModel):
             )
         try:
             source_profile = SourceProfile.model_validate(raw)
-        except Exception as exc:
+        except ValidationError as exc:
             raise ValueError(
                 f"CleaningContext.from_config: {source_profile_path} failed to "
                 f"validate as SourceProfile: {exc}"
