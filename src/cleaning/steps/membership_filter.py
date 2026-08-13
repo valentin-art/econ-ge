@@ -15,7 +15,12 @@ class MembershipFilter(Step):
     ) -> None:
         super().__init__(name)
         self.column = column
-        self.allowed_values = allowed_values
+        self.allowed_values = list(allowed_values)
+        if not self.allowed_values:
+            raise ValueError(
+                f"MembershipFilter {name!r}: allowed_values is empty; "
+                "this would drop every row"
+            )
         self.required_columns = frozenset({column})
 
     def apply(
