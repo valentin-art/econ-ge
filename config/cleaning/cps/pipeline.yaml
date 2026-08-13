@@ -12,19 +12,7 @@ steps:
     column: CLASSWLY
     allowed_values: [20, 22, 24, 25, 27, 28, 10, 13, 14]
 
-  - name: age_last_year
-    type: FunctionStep
-    function: src.cleaning.custom_functions.age_last_year
-    required_columns: [AGE]
-    produced_columns: [AGELY]
-
   - name: age_topcode
     type: TopcodeCapStep
     column: AGE
     ceiling: 90
-
-  - name: weeks_worked_bridge
-    type: FunctionStep
-    function: src.cleaning.custom_functions.bridge_weeks_pre_1976
-    required_columns: [YEAR, WKSWORK1, WKSWORK2, FEMALE, RACE]
-    produced_columns: [WEEKS_WORKED]
