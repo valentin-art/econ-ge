@@ -55,6 +55,7 @@ class RunReport:
     context_hash: str
     started_at: datetime
     finished_at: datetime
+    pipeline_hash: str | None = None
 
 
 class Step(ABC):
@@ -177,11 +178,33 @@ class Pipeline:
         # Laod config file
         raw = yaml.safe_load(config_path.read_text()) or {}
 
-        # Determine steps: name, type, parameters
+        known_keys = {"name", "steps", "validate_between_steps", "known_input_columns"}
+        unknown = set(raw) - known_keys
+        if unknown:
+            raise ValueError(
+                f"Pipeline.from_config: {config_path} has unknown top-level keys "
+                f"{sorted(unknown)}; expected {sorted(known_keys)}"
+            )
+
         steps: list[Step] = []
-        for block in raw.get("steps", []):
+        seen_names: set[str] = set()
+        for position, block in enumerate(raw.get("steps") or []):
+            if not isinstance(block, Mapping):
+                raise TypeError(
+                    f"Pipeline.from_config: {config_path} step #{position} is "
+                    f"{type(block).__name__}, expected a mapping of "
+                    "{type: ..., name: ..., **kwargs}"
+                )
             block = dict(block)
             type_name = block.pop("type", None)
+            step_name = block.get("name", f"<unnamed #{position}>")
+            if step_name in seen_names:
+                raise ValueError(
+                    f"Pipeline.from_config: {config_path} has duplicate step name "
+                    f"{step_name!r}; names must be unique within a pipeline"
+                )
+            seen_names.add(step_name)
+
             step_name = block.get("name", "<unnamed>")
             builder = registry.get(type_name)
             if builder is None:
