@@ -9,7 +9,7 @@ of already-bronzed parquet (`data/bronze/bea/{FixedAssets,NIPA}/*.parquet`)
 
 Produces one row per year with nominal/real levels *and* indices for the
 IT / non-IT capital buckets, rental prices, investment, the internal rate of
-return, and the output-value aggregate. See docs/data/silver/bea/README.md
+return, and the output-value aggregate. See docs/bea_silver_derivations.md
 for the derivation of every column, with formulas.
 """
 

@@ -16,7 +16,7 @@ sources:
           Annual BEA-derived capital-services panel (IT / non-IT capital
           buckets, Hall-Jorgenson framework), one row per year. Built by
           src/pipelines/bea_silver_pipeline.py from BEA Fixed Assets and NIPA
-          bronze tables; see docs/data/silver/bea/README.md for the full
+          bronze tables; see docs/bea_silver_derivations.md for the full
           derivation. Loaded via full TRUNCATE + COPY refresh on every run
           (src/pipelines/bea_load_to_db.py) — no incremental load, no unique
           key beyond `year`.
