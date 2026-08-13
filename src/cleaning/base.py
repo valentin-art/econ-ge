@@ -136,6 +136,9 @@ class Pipeline:
         validate_compatibility(...):
             Checks all requred and produced columns are compatible on each
             step.
+        validate_against_context(...):
+            Checks each step's declared context dependencies (e.g. a
+            named sub-context key) actually exist on a given context.
         apply(...):
             Applies steps one-by-one, returns cleaned dataset and cleanin
             report.
@@ -248,6 +251,18 @@ class Pipeline:
                     f"step in pipeline {self.name!r}"
                 )
             available |= step.produced_columns
+        return issues
+
+    def validate_against_context(self, context: CleaningContext) -> list[str]:
+        """Static check: does `context` have everything that every step
+        declares it needs?
+
+        Returns a list of issues. If any step has missing sub-context.
+        """
+        issues: list[str] = []
+        for index, step in enumerate(self.steps):
+            for issue in step.validate_context(context):
+                issues.append(f"step {index} ({step.name!r}): {issue}")
         return issues
 
     def apply(
