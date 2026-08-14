@@ -26,6 +26,7 @@ import hashlib
 import json
 import uuid
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 import polars as pl
@@ -276,19 +277,34 @@ class CleaningContext(BaseModel):
         """A stable hash of this context's methodology.
 
         - Excludes `run_id` (a run identifier, not a methodology).
-        - `crosswalks` (arbitrary-type `pl.DataFrame` values) is excluded
-          from the automatic JSON dump and hashed separately via each
-          table's own row contents.
+        - `topcode`/`crosswalks` are dumped explicitly rather than via the
+          whole-model `model_dump()`: both are frozen into `MappingProxyType`
+          by `_freeze_mappings`, which pydantic's JSON serializer can't walk.
         """
-        payload = self.model_dump(mode="json", exclude={"crosswalks"})
-        payload["run_metadata"].pop("run_id", None)
-        payload["crosswalks"] = {
-            name: self.crosswalks[name].to_dicts() for name in sorted(self.crosswalks)
+        run_metadata = self.run_metadata.model_dump(mode="json")
+        run_metadata.pop("run_id", None)
+        payload = {
+            "source_profile": self.source_profile.model_dump(mode="json"),
+            "run_metadata": run_metadata,
+            "topcode": {
+                name: cfg.model_dump(mode="json")
+                for name, cfg in sorted(self.topcode.items())
+            },
+            "crosswalks": {
+                name: self.crosswalks[name].to_dicts()
+                for name in sorted(self.crosswalks)
+            },
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         )
         return digest.hexdigest()
+
+    @model_validator(mode="after")
+    def _freeze_mappings(self) -> CleaningContext:
+        object.__setattr__(self, "topcode", MappingProxyType(dict(self.topcode)))
+        object.__setattr__(self, "crosswalks", MappingProxyType(dict(self.crosswalks)))
+        return self
 
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
