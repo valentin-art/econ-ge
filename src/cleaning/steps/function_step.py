@@ -43,15 +43,21 @@ class FunctionStep(Step):
         )
 
 
-def _build_function_step(
+def _resolve_function_step(
     name: str,
     function: str,
     required_columns: list[str],
     produced_columns: list[str],
     params: Mapping[str, object] | None = None,
-    allowed_prefixes: tuple[str, ...] = (_ALLOWED_FUNCTION_PREFIX,),
+    *,
+    allowed_prefixes: tuple[str, ...],
 ) -> FunctionStep:
-    """Function Step."""
+    """Shared implementation behind `_build_function_step` (the
+    STEP_BUILDERS-registered, YAML-facing builder, fixed to
+    `_ALLOWED_FUNCTION_PREFIX`) and tests, which bind a wider allowlist via
+    `functools.partial` to exercise dotted-path resolution against a
+    fixtures module without weakening what a pipeline YAML can reach.
+    """
     module_path, _, attr_name = function.rpartition(".")
     if not module_path:
         raise ValueError(
@@ -61,7 +67,7 @@ def _build_function_step(
     if not function.startswith(allowed_prefixes):
         raise ValueError(
             f"FunctionStep {name!r}: function={function!r} must live under "
-            f"{_ALLOWED_FUNCTION_PREFIX}; arbitrary dotted paths are not "
+            f"one of {allowed_prefixes}; arbitrary dotted paths are not "
             "resolvable from YAML"
         )
     try:
@@ -103,4 +109,30 @@ def _build_function_step(
         fn=fn,
         required_columns=frozenset(required_columns),
         produced_columns=frozenset(produced_columns),
+    )
+
+
+def _build_function_step(
+    name: str,
+    function: str,
+    required_columns: list[str],
+    produced_columns: list[str],
+    params: Mapping[str, object] | None = None,
+) -> FunctionStep:
+    """Registered under `STEP_BUILDERS["FunctionStep"]`. Unlike every other
+    constructor kwarg here, the allowlist is intentionally not a parameter
+    of this function: `Pipeline.from_config` calls builders as
+    `builder(**block)` with `block` taken straight from YAML, so if
+    `allowed_prefixes` were settable here a pipeline config could widen its
+    own import sandbox. A YAML block that includes an `allowed_prefixes`
+    key fails loudly with a `TypeError` (wrapped as a `ValueError` by
+    `Pipeline.from_config`) rather than silently taking effect.
+    """
+    return _resolve_function_step(
+        name=name,
+        function=function,
+        required_columns=required_columns,
+        produced_columns=produced_columns,
+        params=params,
+        allowed_prefixes=(_ALLOWED_FUNCTION_PREFIX,),
     )
