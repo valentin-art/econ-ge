@@ -33,6 +33,14 @@ per_year:
   1993: 99999
   1994: 99999
   1995: 99999
+  # UNVERIFIED - the 1995 -> 1996 drop is a 4x fall (99999 -> 25000) with no
+  # documented CPS methodology change behind it, and 25000 then holds through
+  # 2002. It is plausibly a transcription error in the chain from
+  # aa_clean/clean7909km.do. At 25000 the threshold catches ~37% of wage
+  # earners rather than the ~1% tail a topcode is meant to mark, so every
+  # adjusted value for survey years 1996-2002 should be treated as provisional
+  # until someone checks this block against the original .do file. See
+  # notebooks/research/ep42_ipums_basic_cleaning.ipynb.
   1996: 25000
   1997: 25000
   1998: 25000

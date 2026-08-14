@@ -192,14 +192,80 @@ def test_raises_when_input_already_has_a_reserved_scratch_column() -> None:
         TopcodeAdjuster("topcode_adjuster").apply(df, _context())
 
 
-def test_warns_when_multiplier_promotes_an_integer_column_to_float() -> None:
+def test_integer_column_is_promoted_to_float_without_a_warning() -> None:
+    # The promotion is unconditional and documented, so it is a property of
+    # the step, not a data condition. Warning about it would fire on every
+    # single run and make Pipeline(fail_on_warning=True) permanently unusable.
     df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [50000]})
 
     result, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
 
     assert result.schema["INCWAGE"] == pl.Float64
+    assert report.warnings == []
+
+
+def test_output_dtype_does_not_depend_on_whether_a_row_was_topcoded() -> None:
+    hit = pl.DataFrame({"YEAR": [1970], "INCWAGE": [50000]})
+    miss = pl.DataFrame({"YEAR": [1970], "INCWAGE": [10]})
+    step = TopcodeAdjuster("topcode_adjuster")
+
+    hit_result, _ = step.apply(hit, _context())
+    miss_result, _ = step.apply(miss, _context())
+
+    assert hit_result.schema["INCWAGE"] == miss_result.schema["INCWAGE"] == pl.Float64
+
+
+def test_uncovered_year_warns_when_configured_to_skip() -> None:
+    # Under `skip` an uncovered year must still leave a trace in the report -
+    # a silent pass-through is exactly the failure mode the policy exists to
+    # avoid. DeflatorMergeStep already behaves this way.
+    df = pl.DataFrame({"YEAR": [1970, 2015], "INCWAGE": [50000.0, 200000.0]})
+
+    _, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
     assert len(report.warnings) == 1
-    assert "Float64" in report.warnings[0]
+    assert "2015" in report.warnings[0]
+    assert report.branches_taken["no_threshold_for_year"] == 1
+
+
+def test_null_year_is_reported_separately_from_an_uncovered_year() -> None:
+    # Regression: a null YEAR matches no band, so it lands among the uncovered
+    # rows - and `sorted()` over a year list containing None raised TypeError
+    # instead of the intended, actionable ValueError.
+    df = pl.DataFrame(
+        {"YEAR": [1970, None, 2015], "INCWAGE": [50000.0, 60000.0, 200000.0]}
+    )
+
+    _, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert len(report.warnings) == 2
+    assert any("null YEAR" in warning for warning in report.warnings)
+    assert any("2015" in warning for warning in report.warnings)
+    assert report.branches_taken["no_threshold_for_year"] == 2
+
+
+def test_null_year_raises_a_value_error_not_a_type_error_under_error_policy() -> None:
+    context = CleaningContext(
+        source_profile=SourceProfile(kind="ipums_cps_asec"),
+        topcode={
+            "wage": TopcodeConfig(
+                multiplier=1.5,
+                uncovered_years="error",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=1996,
+                        end_year=1996,
+                        threshold=150000,
+                        match_mode="gte",
+                    )
+                ],
+            )
+        },
+    )
+    df = pl.DataFrame({"YEAR": [None, 2015], "INCWAGE": [200000.0, 200000.0]})
+
+    with pytest.raises(ValueError, match=r"no threshold band.*\[2015\]"):
+        TopcodeAdjuster("topcode_adjuster").apply(df, context)
 
 
 def test_uncovered_year_raises_when_configured_to_error() -> None:

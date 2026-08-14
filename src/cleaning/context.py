@@ -40,6 +40,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    field_serializer,
     model_validator,
 )
 
@@ -218,8 +219,16 @@ class CleaningContext(BaseModel):
             Needs to identify a version of the context used.
     """
 
-    # Configure as immutable
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+    # Configure as immutable. populate_by_name lets a dump made with
+    # by_alias=True be fed straight back into model_validate - without it the
+    # round-trip breaks, since the dump carries `topcode`/`deflators`/
+    # `crosswalks` but the fields are named with a trailing underscore.
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+        populate_by_name=True,
+    )
 
     source_profile: SourceProfile
     run_metadata: RunMetadata = Field(default_factory=RunMetadata)
@@ -379,6 +388,17 @@ class CleaningContext(BaseModel):
     def deflators(self) -> Mapping[str, DeflatorTableConfig]:
         """Read-only view; the model itself stays fully pydantic-serializable."""
         return MappingProxyType(self.deflators_)
+
+    @field_serializer("crosswalks_")
+    def _serialize_crosswalks(
+        self, crosswalks: dict[str, pl.DataFrame]
+    ) -> dict[str, list[dict]]:
+        """`pl.DataFrame` is an arbitrary type, so pydantic cannot serialize it
+        on its own and `model_dump(mode="json")` raises the moment any crosswalk
+        is loaded. Emit row dicts instead, so a context built by `from_config`
+        stays dumpable (Dagster metadata, run manifests, debugging).
+        """
+        return {name: table.to_dicts() for name, table in crosswalks.items()}
 
     @property
     def crosswalks(self) -> Mapping[str, pl.DataFrame]:

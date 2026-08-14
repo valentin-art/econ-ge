@@ -132,10 +132,10 @@ def test_from_config_defaults_optional_subcontexts_when_yaml_absent() -> None:
 
 
 def test_from_config_loads_real_production_config() -> None:
+    # No crosswalks_dir: there is no config/cleaning/crosswalks/ directory.
+    # Passing one anyway would be silently tolerated and assert nothing.
     context = CleaningContext.from_config(
-        config_dir=PRODUCTION_CONFIG,
-        source="ipums_cps_asec",
-        crosswalks_dir=PRODUCTION_CONFIG.parent / "crosswalks",
+        config_dir=PRODUCTION_CONFIG, source="ipums_cps_asec"
     )
 
     wage = context.topcode["wage"]
@@ -151,7 +151,7 @@ def test_from_config_loads_real_production_config() -> None:
     assert band_1962.match_mode == "exact"
 
     # config/cleaning/cps/deflators/*.yaml is transcribed exactly from
-    # src.harmonization.cps_tables - see PR-8.md M6.
+    # src.harmonization.cps_tables, which stays the source of truth.
     assert dict(context.deflators["cpi"].values) == CPI_DEFLATOR
     assert dict(context.deflators["gdp_pce"].values) == GDP_PCE_DEFLATOR
     assert context.deflators["cpi"].uncovered_years == "skip"

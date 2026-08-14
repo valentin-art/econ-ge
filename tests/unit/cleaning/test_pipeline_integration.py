@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from src.cleaning.base import Pipeline
 from src.cleaning.context import CleaningContext
@@ -63,7 +64,7 @@ def test_five_step_pipeline_runs_end_to_end_against_fixture_config() -> None:
 def test_production_pipeline_config_builds_and_is_internally_consistent() -> None:
     # Pins config/cleaning/cps/pipeline.yaml itself (not the fixture) so a
     # typo, an unknown `type:`, or a known_input_columns regression there
-    # is caught here rather than shipping unnoticed - see PR-8.md.
+    # is caught here rather than shipping unnoticed.
     context = CleaningContext.from_config(
         config_dir=PRODUCTION, source="ipums_cps_asec"
     )
@@ -71,3 +72,30 @@ def test_production_pipeline_config_builds_and_is_internally_consistent() -> Non
 
     assert pipeline.validate_compatibility() == []
     assert pipeline.validate_against_context(context) == []
+
+
+def test_production_pipeline_actually_runs_and_deflates_a_known_row() -> None:
+    # Building the production pipeline is not enough: a wrong *value* in a
+    # deflator table passes every structural check above. Run one row per
+    # decade through it and pin the deflated wage.
+    context = CleaningContext.from_config(
+        config_dir=PRODUCTION, source="ipums_cps_asec"
+    )
+    pipeline = Pipeline.from_config(PRODUCTION / "pipeline.yaml", STEP_BUILDERS)
+    df = pl.DataFrame(
+        {
+            "AGE": [40, 40, 40],
+            "CLASSWLY": [22, 22, 22],
+            "YEAR": [1991, 2001, 2005],
+            "INCWAGE": [30000.0, 37500.0, 50000.0],
+        }
+    )
+
+    result, _ = pipeline.apply(df, context)
+
+    # Income year 1990/2000/2004 against config/cleaning/cps/deflators/cpi.yaml.
+    deflators = result["CPI_DEFLATOR"].to_list()
+    assert deflators == pytest.approx([215.3 / 130.7, 215.3 / 172.2, 215.3 / 188.9])
+    # Regression: 2000 was once transcribed as 215.3/215.3 == 1.0, which
+    # understated every survey-year-2001 real wage by ~20%.
+    assert deflators[1] > 1.2

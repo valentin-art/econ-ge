@@ -1,3 +1,5 @@
+from itertools import pairwise
+
 from src.harmonization import cps_tables
 
 
@@ -5,6 +7,18 @@ def test_cpi_deflator_covers_1963_to_2008_excluding_1962() -> None:
     assert 1962 not in cps_tables.CPI_DEFLATOR
     assert cps_tables.CPI_DEFLATOR[1961] == 215.3 / 32.5
     assert cps_tables.CPI_DEFLATOR[2008] == 1.0
+
+
+def test_deflator_series_fall_monotonically_toward_the_2008_base() -> None:
+    # A deflator to a fixed 2008 base must shrink as the income year gets
+    # closer to 2008 - prices only rose over 1961-2008. Any rise means a
+    # mistyped denominator, which is exactly how `2000: 215.3 / 215.3` (the
+    # base year's own denominator, pasted a row early) went unnoticed and
+    # understated every survey-year-2001 real wage by ~20%.
+    for table in (cps_tables.CPI_DEFLATOR, cps_tables.GDP_PCE_DEFLATOR):
+        years = sorted(table)
+        rising = [(a, b) for a, b in pairwise(years) if table[a] < table[b]]
+        assert rising == []
 
 
 def test_gdp_pce_deflator_matches_km_1982_reference() -> None:
