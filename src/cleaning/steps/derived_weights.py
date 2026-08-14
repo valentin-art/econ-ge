@@ -7,9 +7,6 @@ from src.cleaning.context import CleaningContext
 
 
 class DerivedWeightsStep(Step):
-    required_columns = frozenset({"ASECWT", "WKSWORK1", "UHRSWORKLY"})
-    produced_columns = frozenset({"WGT_WKS", "WGT_HRS", "WGT_HRS_FT"})
-
     def __init__(self, name: str, weeks_column: str = "WEEKS_WORKED") -> None:
         super().__init__(name)
         self.weeks_column = weeks_column
@@ -20,11 +17,10 @@ class DerivedWeightsStep(Step):
         self, df: pl.DataFrame, context: CleaningContext
     ) -> tuple[pl.DataFrame, StepReport]:
         n_in = len(df)
+        weeks = pl.col(self.weeks_column)
         result = df.with_columns(
-            (pl.col("ASECWT") * pl.col("WKSWORK1")).alias("WGT_WKS"),
-            (pl.col("ASECWT") * pl.col("WKSWORK1") * pl.col("UHRSWORKLY")).alias(
-                "WGT_HRS"
-            ),
+            (pl.col("ASECWT") * weeks).alias("WGT_WKS"),
+            (pl.col("ASECWT") * weeks * pl.col("UHRSWORKLY")).alias("WGT_HRS"),
             (pl.col("ASECWT") * pl.col("UHRSWORKLY")).alias("WGT_HRS_FT"),
         )
 

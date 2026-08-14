@@ -145,7 +145,7 @@ class Pipeline:
             report.
     """
 
-    _source_hash: str
+    _source_hash: str | None = None
 
     def __init__(
         self,
@@ -188,7 +188,7 @@ class Pipeline:
         """
         text = config_path.read_text()
         # Laod config file
-        raw = yaml.safe_load(config_path.read_text()) or {}
+        raw = yaml.safe_load(text) or {}
 
         known_keys = {"name", "steps", "validate_between_steps", "known_input_columns"}
         unknown = set(raw) - known_keys
@@ -202,7 +202,7 @@ class Pipeline:
         seen_names: set[str] = set()
         for position, block in enumerate(raw.get("steps") or []):
             if not isinstance(block, Mapping):
-                raise TypeError(
+                raise ValueError(  # noqa: TRY004
                     f"Pipeline.from_config: {config_path} step #{position} is "
                     f"{type(block).__name__}, expected a mapping of "
                     "{type: ..., name: ..., **kwargs}"
@@ -217,7 +217,6 @@ class Pipeline:
                 )
             seen_names.add(step_name)
 
-            step_name = block.get("name", "<unnamed>")
             builder = registry.get(type_name)
             if builder is None:
                 raise ValueError(
