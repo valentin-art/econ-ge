@@ -17,6 +17,7 @@ Classes:
 
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -144,6 +145,8 @@ class Pipeline:
             report.
     """
 
+    _source_hash: str
+
     def __init__(
         self,
         steps: list[Step],
@@ -178,6 +181,7 @@ class Pipeline:
         Raise:
             ValueError if config file has unknown or invalid steps.
         """
+        text = config_path.read_text()
         # Laod config file
         raw = yaml.safe_load(config_path.read_text()) or {}
 
@@ -223,13 +227,15 @@ class Pipeline:
                     f"Pipeline.from_config: {config_path} step {step_name!r} "
                     f"(type={type_name!r}) failed to construct: {exc}"
                 ) from exc
-
-        return cls(
+        pipeline = cls(
             steps=steps,
             name=raw.get("name", config_path.stem),
             validate_between_steps=raw.get("validate_between_steps", False),
             known_input_columns=frozenset(raw.get("known_input_columns", [])),
         )
+        pipeline._source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        return pipeline
 
     def validate_compatibility(self) -> list[str]:
         """Is each step's required_columns satisfied by `known_input_columns`
@@ -316,5 +322,6 @@ class Pipeline:
             context_hash=context.compute_hash(),
             started_at=started_at,
             finished_at=finished_at,
+            pipeline_hash=getattr(self, "_source_hash", None),
         )
         return current, run_report
