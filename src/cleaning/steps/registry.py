@@ -16,12 +16,12 @@ from src.cleaning.steps.derived_weights import DerivedWeightsStep
 from src.cleaning.steps.function_step import _build_function_step
 from src.cleaning.steps.membership_filter import MembershipFilter
 from src.cleaning.steps.topcode_adjuster import TopcodeAdjuster
-from src.cleaning.steps.topcode_cap import TopcodeCapFilter
+from src.cleaning.steps.topcode_cap import TopcodeCapStep
 
 STEP_BUILDERS: dict[str, Callable[..., Step]] = {
     "BandFilter": BandFilter,
     "MembershipFilter": MembershipFilter,
-    "TopcodeCapStep": TopcodeCapFilter,
+    "TopcodeCapStep": TopcodeCapStep,
     "TopcodeAdjuster": TopcodeAdjuster,
     "DeflatorMergeStep": DeflatorMergeStep,
     "DerivedWeightsStep": DerivedWeightsStep,
