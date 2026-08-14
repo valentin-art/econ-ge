@@ -7,6 +7,14 @@ from src.cleaning.context import CleaningContext
 
 
 class DerivedWeightsStep(Step):
+    """Derives three ASECWT-scaled weight columns: `WGT_WKS = ASECWT *
+    weeks_column`, `WGT_HRS = ASECWT * weeks_column * UHRSWORKLY`, and
+    `WGT_HRS_FT = ASECWT * UHRSWORKLY` (no weeks term). `weeks_column`
+    defaults to `WEEKS_WORKED` (the output of `bridge_weeks_pre_1976`, not
+    the raw `WKSWORK1`) so pre-1976 rows get a weight instead of a silent
+    null; pass `weeks_column="WKSWORK1"` to skip the bridge deliberately.
+    """
+
     def __init__(self, name: str, weeks_column: str = "WEEKS_WORKED") -> None:
         super().__init__(name)
         self.weeks_column = weeks_column

@@ -11,8 +11,10 @@ Classes:
     TopcodeConfig:
         Multiplier + year-banded thresholds for one income column's topcode
         adjustment (see TopcodeAdjuster).
+    DeflatorTableConfig:
+        A year-keyed deflator table (see DeflatorMergeStep).
     CleaningContext:
-        Builds a full context from a pipeline coonfig file (source_profile.yaml)
+        Builds a full context from a pipeline config file (source_profile.yaml)
         and subcontext files (*.yaml).
 
 Functions:
@@ -25,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
+from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -44,7 +48,7 @@ SourceKind = Literal["ipums_cps_asec", "nber_mw", "raw_asec_march", "psid"]
 
 class SourceProfile(BaseModel):
     """Identifies which source a CleaningContext was built for, and what it
-    can provide. Steps use instsnces of that class to branch on source-specific
+    can provide. Steps use instances of that class to branch on source-specific
     behavior.
 
     Attributes:
@@ -98,7 +102,7 @@ class TopcodeConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     multiplier: float = 1.0
-    thresholds: list[YearBandThreshold] = Field(default_factory=list)
+    thresholds: tuple[YearBandThreshold, ...] = Field(default_factory=tuple)
     uncovered_years: Literal["error", "skip"]
 
     @model_validator(mode="before")
@@ -141,17 +145,46 @@ class TopcodeConfig(BaseModel):
                 "no-op on every row. Provide `bands:` and/or `per_year:`."
             )
         spans = sorted((t.start_year, t.end_year) for t in self.thresholds)
-        for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
-            if s1 > e1:
+        for start, end in spans:
+            if start > end:
                 raise ValueError(
-                    f"TopcodeConfig: band {s1}-{e1} has start_year > end_year"
+                    f"TopcodeConfig: band {start}-{end} has start_year > end_year; "
+                    "is_between() would match nothing and the band would silently "
+                    "no-op"
                 )
+        for (s1, e1), (s2, e2) in pairwise(spans):
             if s2 <= e1:
                 raise ValueError(
                     f"TopcodeConfig: overlapping bands {s1}-{e1} and {s2}-{e2}; "
                     "band precedence would be silently order-dependent"
                 )
         return self
+
+
+class DeflatorTableConfig(BaseModel):
+    """One year-keyed deflator table (income year -> multiplier), e.g. CPI
+    or GDP-PCE (see `DeflatorMergeStep`). `uncovered_years` mirrors
+    `TopcodeConfig`'s policy: an income year absent from `values` is either
+    a raised error or a per-row warning, never a silent null.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    values_: dict[int, float] = Field(alias="values")
+    uncovered_years: Literal["error", "skip"]
+
+    @model_validator(mode="after")
+    def _check_values(self) -> DeflatorTableConfig:
+        if not self.values_:
+            raise ValueError(
+                "DeflatorTableConfig: `values` is empty - every income year "
+                "would be uncovered."
+            )
+        return self
+
+    @property
+    def values(self) -> Mapping[int, float]:
+        """Read-only view; the model itself stays pydantic-serializable."""
+        return MappingProxyType(self.values_)
 
 
 class CleaningContext(BaseModel):
@@ -169,6 +202,10 @@ class CleaningContext(BaseModel):
             Named topcode sub-contexts (one per income column), loaded from
             `config_dir/topcode/*.yaml`, keyed by filename stem. Empty when
             no `topcode/` directory exists for this source.
+        deflators (dict[str, DeflatorTableConfig]):
+            Named deflator tables, loaded from `config_dir/deflators/*.yaml`,
+            keyed by filename stem. Empty when no `deflators/` directory
+            exists for this source.
         crosswalks (dict[str, pl.DataFrame]):
             Named crosswalk tables, loaded from `crosswalks_dir/*.csv`,
             keyed by filename stem. Empty when `crosswalks_dir` is not
@@ -178,7 +215,7 @@ class CleaningContext(BaseModel):
         from_config(...):
             Builds a context from yaml-config file.
         compute_hash(...):
-            Needs to identify a verstion of the context used.
+            Needs to identify a version of the context used.
     """
 
     # Configure as immutable
@@ -186,8 +223,13 @@ class CleaningContext(BaseModel):
 
     source_profile: SourceProfile
     run_metadata: RunMetadata = Field(default_factory=RunMetadata)
-    topcode: dict[str, TopcodeConfig] = Field(default_factory=dict)
-    crosswalks: dict[str, pl.DataFrame] = Field(default_factory=dict)
+    topcode_: dict[str, TopcodeConfig] = Field(default_factory=dict, alias="topcode")
+    deflators_: dict[str, DeflatorTableConfig] = Field(
+        default_factory=dict, alias="deflators"
+    )
+    crosswalks_: dict[str, pl.DataFrame] = Field(
+        default_factory=dict, alias="crosswalks"
+    )
 
     @classmethod
     def from_config(
@@ -195,7 +237,7 @@ class CleaningContext(BaseModel):
         config_dir: Path,
         source: SourceKind,
         crosswalks_dir: Path | None = None,
-        overrides: dict | None = None,
+        overrides: dict[str, object] | None = None,
     ) -> CleaningContext:
         """Build a CleaningContext for given data source from YAML config.
 
@@ -209,8 +251,9 @@ class CleaningContext(BaseModel):
                 loaded into `context.crosswalks[<file stem>]`. Optional -
                 skipped entirely (crosswalks stays `{}`) when not given or
                 when the directory doesn't exist.
-            overrides:
-                Overrides the instance with new information.
+            overrides (dict[str, object] | None):
+                Deep-merged onto `source_profile.yaml` before validation -
+                reaches only `source_profile`, not `topcode` or `crosswalks`.
 
         Raises:
             ValueError if `config_dir/source_profile.yaml` is missing or
@@ -261,6 +304,22 @@ class CleaningContext(BaseModel):
                         f"validate as TopcodeConfig: {exc}"
                     ) from exc
 
+        # Load optional named deflator tables
+        deflators: dict[str, DeflatorTableConfig] = {}
+        deflators_dir = config_dir / "deflators"
+        if deflators_dir.exists():
+            for deflator_path in sorted(deflators_dir.glob("*.yaml")):
+                raw_deflator = yaml.safe_load(deflator_path.read_text()) or {}
+                try:
+                    deflators[deflator_path.stem] = DeflatorTableConfig.model_validate(
+                        raw_deflator
+                    )
+                except ValidationError as exc:
+                    raise ValueError(
+                        f"CleaningContext.from_config: {deflator_path} failed to "
+                        f"validate as DeflatorTableConfig: {exc}"
+                    ) from exc
+
         # Load optional crosswalk tables
         crosswalks: dict[str, pl.DataFrame] = {}
         if crosswalks_dir is not None and crosswalks_dir.exists():
@@ -270,6 +329,7 @@ class CleaningContext(BaseModel):
         return cls(
             source_profile=source_profile,
             topcode=topcode,
+            deflators=deflators,
             crosswalks=crosswalks,
         )
 
@@ -277,18 +337,28 @@ class CleaningContext(BaseModel):
         """A stable hash of this context's methodology.
 
         - Excludes `run_id` (a run identifier, not a methodology).
-        - `topcode`/`crosswalks` are dumped explicitly rather than via the
-          whole-model `model_dump()`: both are frozen into `MappingProxyType`
-          by `_freeze_mappings`, which pydantic's JSON serializer can't walk.
+        - `crosswalks` (arbitrary-type `pl.DataFrame` values) is dumped via
+          each table's own row contents rather than the automatic JSON dump.
+        - `available_flags` is a `frozenset`; its `model_dump(mode="json")`
+          ordering follows `PYTHONHASHSEED` and is re-sorted here so the
+          hash identifies the methodology, not the interpreter instance.
         """
         run_metadata = self.run_metadata.model_dump(mode="json")
         run_metadata.pop("run_id", None)
+        source_profile = self.source_profile.model_dump(mode="json")
+        # frozenset -> list ordering follows PYTHONHASHSEED; canonicalise so the
+        # hash identifies the methodology, not the interpreter instance.
+        source_profile["available_flags"] = sorted(source_profile["available_flags"])
         payload = {
-            "source_profile": self.source_profile.model_dump(mode="json"),
+            "source_profile": source_profile,
             "run_metadata": run_metadata,
             "topcode": {
                 name: cfg.model_dump(mode="json")
                 for name, cfg in sorted(self.topcode.items())
+            },
+            "deflators": {
+                name: cfg.model_dump(mode="json", by_alias=True)
+                for name, cfg in sorted(self.deflators.items())
             },
             "crosswalks": {
                 name: self.crosswalks[name].to_dicts()
@@ -300,11 +370,19 @@ class CleaningContext(BaseModel):
         )
         return digest.hexdigest()
 
-    @model_validator(mode="after")
-    def _freeze_mappings(self) -> CleaningContext:
-        object.__setattr__(self, "topcode", MappingProxyType(dict(self.topcode)))
-        object.__setattr__(self, "crosswalks", MappingProxyType(dict(self.crosswalks)))
-        return self
+    @property
+    def topcode(self) -> Mapping[str, TopcodeConfig]:
+        """Read-only view; the model itself stays fully pydantic-serializable."""
+        return MappingProxyType(self.topcode_)
+
+    @property
+    def deflators(self) -> Mapping[str, DeflatorTableConfig]:
+        """Read-only view; the model itself stays fully pydantic-serializable."""
+        return MappingProxyType(self.deflators_)
+
+    @property
+    def crosswalks(self) -> Mapping[str, pl.DataFrame]:
+        return MappingProxyType(self.crosswalks_)
 
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
