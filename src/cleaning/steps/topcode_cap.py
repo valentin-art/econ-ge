@@ -6,7 +6,7 @@ from src.cleaning.base import Step, StepReport
 from src.cleaning.context import CleaningContext
 
 
-class TopcodeCapStep(Step):
+class TopcodeCapFilter(Step):
     def __init__(self, name: str, column: str, ceiling: float) -> None:
         super().__init__(name)
         self.column = column
