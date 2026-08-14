@@ -18,7 +18,9 @@ def age_last_year(
     )
 
 
-def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.DataFrame:
+def bridge_weeks_pre_1976(
+    df: pl.DataFrame, context: CleaningContext
+) -> tuple[pl.DataFrame, list[str]]:
     """Derives WEEKS_WORKED: WKSWORK1 where present; for YEAR<1976 (where
     WKSWORK1 is always null and only the bracketed WKSWORK2 exists), the
     mean WKSWORK1 within the record's own FEMALE/RACE/WKSWORK2 cell, fit
@@ -31,8 +33,10 @@ def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.Data
     Requires the input DataFrame to actually contain 1976-78 rows to fit
     from - called on a purely pre-1976 slice (e.g. a single year's bronze
     file on its own), every bridged value comes out null, since the fit
-    population is empty. For YEAR>=1976 this always just returns WKSWORK1,
-    independent of the fit.
+    population is empty; that case is reported back as a warning rather
+    than raised, since processing a single year's bronze file on its own
+    is a legitimate, if incomplete, way to call this. For YEAR>=1976 this
+    always just returns WKSWORK1, independent of the fit.
     """
 
     TEMP = "_bracket_mean"
@@ -46,8 +50,22 @@ def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.Data
         .agg(pl.col("WKSWORK1").mean().cast(pl.Float64).alias(TEMP))
     )
 
-    return (
-        df.join(group_means, on=["FEMALE", "RACE", "WKSWORK2"], how="left")
+    n_pre_1976 = df.filter(pl.col("YEAR") < 1976).height
+    warnings: list[str] = []
+    if n_pre_1976 and group_means.is_empty():
+        warnings.append(
+            "bridge_weeks_pre_1976: no 1976-1978 rows in the input frame to fit "
+            f"bracket means from; all {n_pre_1976} pre-1976 row(s) get a null "
+            "WEEKS_WORKED"
+        )
+
+    result = (
+        df.join(
+            group_means,
+            on=["FEMALE", "RACE", "WKSWORK2"],
+            how="left",
+            maintain_order="left",
+        )
         .with_columns(
             pl.when(pl.col("YEAR") < 1976)
             .then(pl.coalesce([pl.col("WKSWORK1").cast(pl.Float64), pl.col(TEMP)]))
@@ -56,3 +74,4 @@ def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.Data
         )
         .drop(TEMP)
     )
+    return result, warnings
