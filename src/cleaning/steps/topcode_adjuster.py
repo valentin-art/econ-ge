@@ -7,7 +7,7 @@ multiplies on a given number.
 Example: wages or earnings with corresponding set of top codes in context files.
 
 Classes:
-    TopCodeAdjuster
+    TopcodeAdjuster
 """
 
 import polars as pl
@@ -26,7 +26,7 @@ class TopcodeAdjuster(Step):
             A name of the column with topcodes which will be adjusted.
         topcode_key (str):
             A key that determines a sub-context for the adjuster.
-        requred_columns (set):
+        required_columns (set):
             A set of columns required to apply the step.
         produced_columns (set):
             A set of columns produced by the step.
@@ -53,9 +53,11 @@ class TopcodeAdjuster(Step):
         if self.topcode_key in context.topcode:
             return []
         return [
-            f"no topcode config named {self.topcode_key!r} in context.topcode \
-            (available: {sorted(context.topcode)})"
+            f"no topcode config named {self.topcode_key!r} in context.topcode "
+            f"(available: {sorted(context.topcode)})"
         ]
+
+    _RESERVED_COLUMNS = ("_topcode_hit", "_topcode_mode")
 
     def apply(
         self, df: pl.DataFrame, context: CleaningContext
@@ -69,6 +71,13 @@ class TopcodeAdjuster(Step):
                 f"{self.topcode_key!r} in context.topcode "
                 f"(available: {sorted(context.topcode)})"
             ) from None
+        clash = set(self._RESERVED_COLUMNS) & set(df.columns)
+        if clash:
+            raise ValueError(
+                f"TopcodeAdjuster {self.name!r}: input already has reserved "
+                f"scratch column(s) {sorted(clash)}; rename them before this step"
+            )
+        original_dtype = df.schema[self.column]
         income = pl.col(self.column)
         hit_expr = pl.lit(False)
         mode_expr = pl.lit(None, dtype=pl.Utf8)
@@ -94,9 +103,12 @@ class TopcodeAdjuster(Step):
 
         # Count topcode modes
         hit = pl.col("_topcode_hit").fill_null(False)
+        in_band = pl.col("_topcode_mode").is_not_null()
+        income_is_null = income.is_null()
         exact_adjusted = df.filter(hit & (pl.col("_topcode_mode") == "exact")).height
         gte_adjusted = df.filter(hit & (pl.col("_topcode_mode") == "gte")).height
-        in_band_not_hit = df.filter(~hit & pl.col("_topcode_mode").is_not_null()).height
+        null_income = df.filter(in_band & income_is_null).height
+        in_band_not_hit = df.filter(~hit & in_band & ~income_is_null).height
         no_threshold = uncovered.height
         if no_threshold and cfg.uncovered_years == "error":
             years = sorted(uncovered["YEAR"].unique().to_list())
@@ -113,7 +125,15 @@ class TopcodeAdjuster(Step):
             .then(income.cast(pl.Float64) * cfg.multiplier)
             .otherwise(income.cast(pl.Float64))
             .alias(self.column)
-        ).drop(["_topcode_hit", "_topcode_mode"])
+        ).drop(list(self._RESERVED_COLUMNS))
+
+        warnings = (
+            [
+                f"{self.column} promoted {original_dtype} -> Float64 by the topcode multiplier"
+            ]
+            if original_dtype != pl.Float64
+            else []
+        )
 
         return result, StepReport(
             step_name=self.name,
@@ -123,6 +143,8 @@ class TopcodeAdjuster(Step):
                 "exact_match": exact_adjusted,
                 "gte_match": gte_adjusted,
                 "in_band_not_hit": in_band_not_hit,
+                "null_income": null_income,
                 "no_threshold_for_year": no_threshold,
             },
+            warnings=warnings,
         )
