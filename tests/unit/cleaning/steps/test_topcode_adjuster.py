@@ -66,6 +66,7 @@ def test_applies_multiplier_across_pre_and_post_1988_eras() -> None:
         "exact_match": 1,
         "gte_match": 2,
         "in_band_not_hit": 2,
+        "null_income": 0,
         "no_threshold_for_year": 1,
     }
 
@@ -170,3 +171,56 @@ def test_validate_context_flags_missing_topcode_key_before_apply() -> None:
     assert len(issues) == 1
     assert "income" in issues[0]
     assert "wage" in issues[0]
+
+
+def test_null_income_in_a_covered_band_is_reported_separately_from_a_miss() -> None:
+    # A null income value in an otherwise-covered band should not be
+    # indistinguishable from "in band, below threshold" - see null_income.
+    df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [None]})
+
+    result, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert result["INCWAGE"].to_list() == [None]
+    assert report.branches_taken["null_income"] == 1
+    assert report.branches_taken["in_band_not_hit"] == 0
+
+
+def test_raises_when_input_already_has_a_reserved_scratch_column() -> None:
+    df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [50000.0], "_topcode_hit": [True]})
+
+    with pytest.raises(ValueError, match="_topcode_hit"):
+        TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+
+def test_warns_when_multiplier_promotes_an_integer_column_to_float() -> None:
+    df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [50000]})
+
+    result, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert result.schema["INCWAGE"] == pl.Float64
+    assert len(report.warnings) == 1
+    assert "Float64" in report.warnings[0]
+
+
+def test_uncovered_year_raises_when_configured_to_error() -> None:
+    context = CleaningContext(
+        source_profile=SourceProfile(kind="ipums_cps_asec"),
+        topcode={
+            "wage": TopcodeConfig(
+                multiplier=1.5,
+                uncovered_years="error",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=1996,
+                        end_year=1996,
+                        threshold=150000,
+                        match_mode="gte",
+                    )
+                ],
+            )
+        },
+    )
+    df = pl.DataFrame({"YEAR": [2015], "INCWAGE": [200000.0]})
+
+    with pytest.raises(ValueError, match=r"no threshold band.*\[2015\]"):
+        TopcodeAdjuster("topcode_adjuster").apply(df, context)

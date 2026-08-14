@@ -5,7 +5,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from src.cleaning.context import CleaningContext, SourceProfile, TopcodeConfig
+from src.cleaning.context import (
+    CleaningContext,
+    DeflatorTableConfig,
+    SourceProfile,
+    TopcodeConfig,
+    YearBandThreshold,
+)
+from src.harmonization.cps_tables import CPI_DEFLATOR, GDP_PCE_DEFLATOR
 
 FIXTURES = Path(__file__).parent / "fixtures" / "config"
 PRODUCTION_CONFIG = Path(__file__).parents[3] / "config" / "cleaning" / "cps"
@@ -79,6 +86,35 @@ def test_compute_hash_changes_with_overrides() -> None:
     assert baseline.compute_hash() != overridden.compute_hash()
 
 
+def test_context_survives_pickle_deepcopy_and_json_dump() -> None:
+    # Regression: freezing topcode/crosswalks into MappingProxyType at
+    # construction previously broke pickle (needed by multiprocess
+    # executors like Dagster's) and model_dump(mode="json").
+    import copy
+    import pickle
+
+    context = CleaningContext(
+        source_profile=SourceProfile(kind="ipums_cps_asec"),
+        topcode={
+            "wage": TopcodeConfig(
+                uncovered_years="skip",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=2000,
+                        end_year=2000,
+                        threshold=1.0,
+                        match_mode="gte",
+                    )
+                ],
+            )
+        },
+    )
+
+    assert pickle.loads(pickle.dumps(context)).compute_hash() == context.compute_hash()
+    assert copy.deepcopy(context).compute_hash() == context.compute_hash()
+    assert context.model_dump(mode="json")["source_profile"]["kind"] == "ipums_cps_asec"
+
+
 def test_compute_hash_ignores_run_id() -> None:
     context_a = CleaningContext(source_profile=SourceProfile(kind="ipums_cps_asec"))
     context_b = CleaningContext(source_profile=SourceProfile(kind="ipums_cps_asec"))
@@ -113,6 +149,12 @@ def test_from_config_loads_real_production_config() -> None:
     assert band_2009.match_mode == "gte"
     band_1962 = next(b for b in wage.thresholds if b.start_year == 1962)
     assert band_1962.match_mode == "exact"
+
+    # config/cleaning/cps/deflators/*.yaml is transcribed exactly from
+    # src.harmonization.cps_tables - see PR-8.md M6.
+    assert dict(context.deflators["cpi"].values) == CPI_DEFLATOR
+    assert dict(context.deflators["gdp_pce"].values) == GDP_PCE_DEFLATOR
+    assert context.deflators["cpi"].uncovered_years == "skip"
 
 
 def test_from_config_loads_multiple_named_topcode_instances(tmp_path: Path) -> None:
@@ -187,3 +229,95 @@ def test_from_config_raises_when_optional_subcontext_malformed(tmp_path: Path) -
         CleaningContext.from_config(
             config_dir=tmp_path, source="ipums_cps_asec", crosswalks_dir=tmp_path
         )
+
+
+def test_empty_thresholds_is_rejected() -> None:
+    with pytest.raises(ValueError, match="thresholds"):
+        TopcodeConfig(uncovered_years="skip", thresholds=[])
+
+
+def test_inverted_single_band_is_rejected() -> None:
+    # Regression: start_year > end_year must be caught even with only one
+    # band - is_between(start, end) would silently match nothing.
+    with pytest.raises(ValueError, match="start_year > end_year"):
+        TopcodeConfig(
+            uncovered_years="skip",
+            thresholds=[
+                YearBandThreshold(
+                    start_year=1990, end_year=1980, threshold=5.0, match_mode="gte"
+                )
+            ],
+        )
+
+
+def test_inverted_last_band_among_several_is_rejected() -> None:
+    with pytest.raises(ValueError, match="start_year > end_year"):
+        TopcodeConfig(
+            uncovered_years="skip",
+            thresholds=[
+                YearBandThreshold(
+                    start_year=1980, end_year=1985, threshold=5.0, match_mode="gte"
+                ),
+                YearBandThreshold(
+                    start_year=2000, end_year=1990, threshold=6.0, match_mode="gte"
+                ),
+            ],
+        )
+
+
+def test_overlapping_bands_are_rejected() -> None:
+    with pytest.raises(ValueError, match="overlapping bands"):
+        TopcodeConfig(
+            uncovered_years="skip",
+            thresholds=[
+                YearBandThreshold(
+                    start_year=1980, end_year=1990, threshold=5.0, match_mode="gte"
+                ),
+                YearBandThreshold(
+                    start_year=1985, end_year=1995, threshold=6.0, match_mode="gte"
+                ),
+            ],
+        )
+
+
+def test_thresholds_cannot_be_mutated_after_construction() -> None:
+    config = TopcodeConfig(
+        uncovered_years="skip",
+        thresholds=[
+            YearBandThreshold(
+                start_year=1980, end_year=1990, threshold=5.0, match_mode="gte"
+            )
+        ],
+    )
+
+    assert isinstance(config.thresholds, tuple)
+    with pytest.raises(AttributeError):
+        config.thresholds.append(  # type: ignore[attr-defined]
+            YearBandThreshold(
+                start_year=2000, end_year=2000, threshold=6.0, match_mode="gte"
+            )
+        )
+
+
+def test_deflator_table_config_empty_values_is_rejected() -> None:
+    with pytest.raises(ValueError, match="values"):
+        DeflatorTableConfig(values={}, uncovered_years="skip")
+
+
+def test_deflator_table_config_values_view_cannot_be_mutated() -> None:
+    config = DeflatorTableConfig(values={1980: 1.5}, uncovered_years="skip")
+
+    assert dict(config.values) == {1980: 1.5}
+    with pytest.raises(TypeError):
+        config.values[1990] = 2.0  # type: ignore[index]
+
+
+def test_deflator_table_config_survives_pickle_and_json_dump() -> None:
+    import pickle
+
+    config = DeflatorTableConfig(values={1980: 1.5, 1981: 1.6}, uncovered_years="error")
+
+    assert pickle.loads(pickle.dumps(config)).values == config.values
+    dumped = config.model_dump(mode="json", by_alias=True)
+    assert dumped["values"] == {"1980": 1.5, "1981": 1.6}
+    assert dumped["uncovered_years"] == "error"

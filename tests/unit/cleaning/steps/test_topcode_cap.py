@@ -1,7 +1,8 @@
 import polars as pl
+import pytest
 
 from src.cleaning.context import CleaningContext, SourceProfile
-from src.cleaning.steps.topcode_cap import TopcodeCapFilter
+from src.cleaning.steps.topcode_cap import TopcodeCapStep
 
 
 def _context() -> CleaningContext:
@@ -11,7 +12,7 @@ def _context() -> CleaningContext:
 def test_caps_column_at_ceiling() -> None:
     df = pl.DataFrame({"AGE": [85, 90, 95, 100]})
 
-    result, report = TopcodeCapFilter("test", column="AGE", ceiling=90).apply(
+    result, report = TopcodeCapStep("test", column="AGE", ceiling=90).apply(
         df, _context()
     )
 
@@ -24,7 +25,7 @@ def test_caps_column_at_ceiling() -> None:
 def test_reusable_on_a_different_column() -> None:
     df = pl.DataFrame({"UHRSWORKLY": [40, 98, 99]})
 
-    result, _ = TopcodeCapFilter("test", column="UHRSWORKLY", ceiling=98).apply(
+    result, _ = TopcodeCapStep("test", column="UHRSWORKLY", ceiling=98).apply(
         df, _context()
     )
 
@@ -32,7 +33,14 @@ def test_reusable_on_a_different_column() -> None:
 
 
 def test_required_and_produced_columns_reflect_constructor_column() -> None:
-    step = TopcodeCapFilter("test", column="AGE", ceiling=90)
+    step = TopcodeCapStep("test", column="AGE", ceiling=90)
 
     assert step.required_columns == frozenset({"AGE"})
     assert step.produced_columns == frozenset({"AGE"})
+
+
+def test_dtype_mismatch_raises_a_clear_error_naming_the_step_and_column() -> None:
+    df = pl.DataFrame({"CLASSWLY": ["a", "b"]})
+
+    with pytest.raises(ValueError, match="CLASSWLY"):
+        TopcodeCapStep("test", column="CLASSWLY", ceiling=90).apply(df, _context())

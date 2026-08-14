@@ -12,10 +12,10 @@ from src.cleaning.steps.function_step import FunctionStep, _resolve_function_ste
 from src.cleaning.steps.registry import STEP_BUILDERS
 
 # The production STEP_BUILDERS["FunctionStep"] fixes its allowlist to
-# src.cleaning.custom_functions. and cannot be widened from a YAML block
-# (see MAJOR-4 in the review). To exercise `type: FunctionStep` resolution
-# against the tests-only fixtures module, these tests use a registry that
-# substitutes a wider allowlist bound at the Python level, not via config.
+# src.cleaning.custom_functions. and cannot be widened from a YAML block.
+# To exercise `type: FunctionStep` resolution against the tests-only
+# fixtures module, these tests use a registry that substitutes a wider
+# allowlist bound at the Python level, not via config.
 TEST_STEP_BUILDERS = {
     **STEP_BUILDERS,
     "FunctionStep": functools.partial(
@@ -77,40 +77,6 @@ def test_defaults_name_to_file_stem_and_flags_to_false(tmp_path: Path) -> None:
     assert pipeline.steps == []
 
 
-def test_runs_end_to_end_against_fixture_config() -> None:
-    fixture_path = (
-        Path(__file__).parent / "fixtures" / "config" / "cps" / "pipeline.yaml"
-    )
-
-    pipeline = Pipeline.from_config(fixture_path, STEP_BUILDERS)
-
-    assert pipeline.validate_compatibility() == []
-    df = pl.DataFrame(
-        {
-            "AGE": [15, 20, 95, 40],
-            "CLASSWLY": [22, 29, 10, 99],
-            "YEAR": [1970, 1970, 1995, 1970],
-            "WKSWORK1": [None, None, 40, None],
-            "WKSWORK2": [4, 4, 0, 4],
-            "FEMALE": [0, 0, 0, 0],
-            "RACE": [1, 1, 1, 1],
-        }
-    )
-    result, run_report = pipeline.apply(df, _context())
-
-    assert result["AGE"].to_list() == [90]
-    assert result["CLASSWLY"].to_list() == [10]
-    assert result["AGELY"].to_list() == [71]
-    assert result["WEEKS_WORKED"].to_list() == [40.0]
-    assert [step.step_name for step in run_report.steps] == [
-        "age_band_filter",
-        "wage_or_self_employed_filter",
-        "age_last_year",
-        "age_topcode",
-        "weeks_worked_bridge",
-    ]
-
-
 def test_function_step_block_resolves_and_runs(tmp_path: Path) -> None:
     config_path = _write_config(
         tmp_path,
@@ -157,6 +123,47 @@ def test_function_step_block_applies_params(tmp_path: Path) -> None:
     df = pl.DataFrame({"WKSWORK1": [None]})
     result, _ = pipeline.apply(df, _context())
     assert result["WKSWORK1"].to_list() == [30.0]
+
+
+def test_yaml_cannot_widen_the_function_step_allowlist(tmp_path: Path) -> None:
+    # allowed_prefixes is deliberately not a _build_function_step parameter,
+    # so a YAML block that tries to set it fails loudly at construction
+    # rather than silently reaching outside src.cleaning.custom_functions.
+    config_path = _write_config(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "type": "FunctionStep",
+                    "name": "evil",
+                    "function": "tests.unit.cleaning.fixtures.custom_functions."
+                    "fill_missing_weeks_with_default",
+                    "required_columns": [],
+                    "produced_columns": [],
+                    "allowed_prefixes": ["tests."],
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="allowed_prefixes"):
+        Pipeline.from_config(config_path, STEP_BUILDERS)
+
+
+def test_fail_on_warning_is_settable_from_yaml(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, {"fail_on_warning": True, "steps": []})
+
+    pipeline = Pipeline.from_config(config_path, STEP_BUILDERS)
+
+    assert pipeline.fail_on_warning is True
+
+
+def test_explicit_fail_on_warning_argument_overrides_yaml(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, {"fail_on_warning": True, "steps": []})
+
+    pipeline = Pipeline.from_config(config_path, STEP_BUILDERS, fail_on_warning=False)
+
+    assert pipeline.fail_on_warning is False
 
 
 def test_unknown_type_raises_with_available_types_listed(tmp_path: Path) -> None:

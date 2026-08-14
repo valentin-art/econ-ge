@@ -1,4 +1,5 @@
 import polars as pl
+import pytest
 
 from src.cleaning.context import CleaningContext, SourceProfile
 from src.cleaning.steps.function_step import FunctionStep
@@ -54,6 +55,56 @@ def test_reports_generic_row_count_delta_when_function_drops_rows() -> None:
     assert report.n_in == 3
     assert report.n_out == 2
     assert report.dropped_reason_counts == {"function_step": 1}
+
+
+def test_wrapped_function_can_return_warnings_alongside_the_dataframe() -> None:
+    def _fn(
+        df: pl.DataFrame, context: CleaningContext
+    ) -> tuple[pl.DataFrame, list[str]]:
+        return df, ["fit population was empty"]
+
+    step = FunctionStep(
+        "warns",
+        fn=_fn,
+        required_columns=frozenset(),
+        produced_columns=frozenset(),
+    )
+    _, report = step.apply(pl.DataFrame({"X": [1]}), _context())
+
+    assert report.warnings == ["fit population was empty"]
+
+
+def test_warns_when_wrapped_function_adds_rows() -> None:
+    def _fanout(df: pl.DataFrame, context: CleaningContext) -> pl.DataFrame:
+        return pl.concat([df, df])
+
+    step = FunctionStep(
+        "fanout",
+        fn=_fanout,
+        required_columns=frozenset(),
+        produced_columns=frozenset(),
+    )
+    _, report = step.apply(pl.DataFrame({"X": [1, 2]}), _context())
+
+    assert report.n_in == 2
+    assert report.n_out == 4
+    assert len(report.warnings) == 1
+    assert "added 2 rows" in report.warnings[0]
+
+
+def test_raises_when_wrapped_function_returns_a_non_dataframe() -> None:
+    def _bad(df: pl.DataFrame, context: CleaningContext) -> None:
+        return None
+
+    step = FunctionStep(
+        "bad",
+        fn=_bad,
+        required_columns=frozenset(),
+        produced_columns=frozenset(),
+    )
+
+    with pytest.raises(TypeError, match="NoneType"):
+        step.apply(pl.DataFrame({"X": [1]}), _context())
 
 
 def test_required_and_produced_columns_are_explicit_constructor_args() -> None:

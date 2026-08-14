@@ -7,9 +7,10 @@ from src.cleaning.context import CleaningContext
 from src.cleaning.steps.registry import STEP_BUILDERS
 
 FIXTURES = Path(__file__).parent / "fixtures" / "config"
+PRODUCTION = Path(__file__).parents[3] / "config" / "cleaning" / "cps"
 
 
-def test_five_step_pipeline_runs_end_to_end_against_real_config() -> None:
+def test_five_step_pipeline_runs_end_to_end_against_fixture_config() -> None:
     context = CleaningContext.from_config(
         config_dir=FIXTURES / "cps",
         source="ipums_cps_asec",
@@ -57,3 +58,16 @@ def test_five_step_pipeline_runs_end_to_end_against_real_config() -> None:
     assert (run_report.steps[3].n_in, run_report.steps[3].n_out) == (1, 1)
     assert (run_report.steps[4].n_in, run_report.steps[4].n_out) == (1, 1)
     assert run_report.context_hash == context.compute_hash()
+
+
+def test_production_pipeline_config_builds_and_is_internally_consistent() -> None:
+    # Pins config/cleaning/cps/pipeline.yaml itself (not the fixture) so a
+    # typo, an unknown `type:`, or a known_input_columns regression there
+    # is caught here rather than shipping unnoticed - see PR-8.md.
+    context = CleaningContext.from_config(
+        config_dir=PRODUCTION, source="ipums_cps_asec"
+    )
+    pipeline = Pipeline.from_config(PRODUCTION / "pipeline.yaml", STEP_BUILDERS)
+
+    assert pipeline.validate_compatibility() == []
+    assert pipeline.validate_against_context(context) == []

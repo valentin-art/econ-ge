@@ -27,7 +27,7 @@ def test_build_function_step_resolves_dotted_path_and_runs() -> None:
     # _build_function_step (the STEP_BUILDERS-registered, YAML-facing
     # builder) is fixed to src.cleaning.custom_functions.; a fixtures-only
     # dotted path needs the shared resolver with an explicit, code-level
-    # (not YAML-level) allowlist widening - see MAJOR-4 in the review.
+    # (not YAML-level) allowlist widening.
     step = _resolve_function_step(
         name="fill_missing_weeks",
         function=CUSTOM_FN_PATH,
