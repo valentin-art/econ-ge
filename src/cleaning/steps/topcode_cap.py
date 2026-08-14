@@ -1,4 +1,4 @@
-"""TopcodeCapFilter: A Step that drops values of a column above given value."""
+"""TopcodeCapStep: A Step that clips values of a column at a given ceiling."""
 
 import polars as pl
 
@@ -6,7 +6,7 @@ from src.cleaning.base import Step, StepReport
 from src.cleaning.context import CleaningContext
 
 
-class TopcodeCapFilter(Step):
+class TopcodeCapStep(Step):
     def __init__(self, name: str, column: str, ceiling: float) -> None:
         super().__init__(name)
         self.column = column
@@ -20,6 +20,7 @@ class TopcodeCapFilter(Step):
         # Collect info for report
         n_in = len(df)
         col = pl.col(self.column)
+        n_missing = df.select(col.is_null().sum()).item()
         topcoded = df.filter(col > self.ceiling).height
 
         # Filtering
@@ -29,5 +30,9 @@ class TopcodeCapFilter(Step):
             step_name=self.name,
             n_in=n_in,
             n_out=n_in,
-            branches_taken={"topcoded": topcoded, "unchanged": n_in - topcoded},
+            branches_taken={
+                "topcoded": topcoded,
+                "unchanged": n_in - topcoded,
+                "missing": n_missing,
+            },
         )
