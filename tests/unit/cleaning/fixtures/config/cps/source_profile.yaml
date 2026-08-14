@@ -1,0 +1,2 @@
+kind: ipums_cps_asec
+notes: "Fixture source profile for Stage A tests - not production config."

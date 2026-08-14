@@ -1,0 +1,172 @@
+import polars as pl
+import pytest
+
+from src.cleaning.context import (
+    CleaningContext,
+    SourceProfile,
+    TopcodeConfig,
+    YearBandThreshold,
+)
+from src.cleaning.steps.topcode_adjuster import TopcodeAdjuster
+
+
+def _context() -> CleaningContext:
+    return CleaningContext(
+        source_profile=SourceProfile(kind="ipums_cps_asec"),
+        topcode={
+            "wage": TopcodeConfig(
+                multiplier=1.5,
+                uncovered_years="skip",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=1968,
+                        end_year=1981,
+                        threshold=50000,
+                        match_mode="exact",
+                    ),
+                    YearBandThreshold(
+                        start_year=1996,
+                        end_year=1996,
+                        threshold=150000,
+                        match_mode="gte",
+                    ),
+                ],
+            )
+        },
+    )
+
+
+def test_applies_multiplier_across_pre_and_post_1988_eras() -> None:
+    df = pl.DataFrame(
+        {
+            "YEAR": [1970, 1970, 1996, 1996, 1996, 1960],
+            "INCWAGE": [50000.0, 40000.0, 150000.0, 200000.0, 100000.0, 99999.0],
+        }
+    )
+
+    result, report = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert result["INCWAGE"].to_list() == [
+        75000.0,
+        40000.0,
+        225000.0,
+        300000.0,
+        100000.0,
+        99999.0,
+    ]
+    assert report.n_in == 6
+    assert report.n_out == 6
+    # row0 (1970, 50000): in band1 (exact, threshold 50000) -> hit
+    # row1 (1970, 40000): in band1 -> not hit (not == 50000)
+    # row2 (1996, 150000): in band2 (gte, threshold 150000) -> hit
+    # row3 (1996, 200000): in band2 -> hit
+    # row4 (1996, 100000): in band2 -> not hit (not >= 150000)
+    # row5 (1960, 99999): no band covers 1960 -> no_threshold_for_year
+    assert report.branches_taken == {
+        "exact_match": 1,
+        "gte_match": 2,
+        "in_band_not_hit": 2,
+        "no_threshold_for_year": 1,
+    }
+
+
+def test_pre_1988_uses_exact_equality_not_ge() -> None:
+    # aa_clean's pre-1988 style is `== threshold`, not `>= threshold` -
+    # a value strictly above the threshold should NOT be multiplied.
+    df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [60000.0]})
+
+    result, _ = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert result["INCWAGE"].to_list() == [60000.0]
+
+
+def test_1988_plus_uses_ge_not_exact_equality() -> None:
+    df = pl.DataFrame({"YEAR": [1996], "INCWAGE": [999999.0]})
+
+    result, _ = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert result["INCWAGE"].to_list() == [1499998.5]
+
+
+def test_only_incwage_and_year_columns_remain_besides_originals() -> None:
+    df = pl.DataFrame({"YEAR": [1970], "INCWAGE": [50000.0], "OTHER": [1]})
+
+    result, _ = TopcodeAdjuster("topcode_adjuster").apply(df, _context())
+
+    assert set(result.columns) == {"YEAR", "INCWAGE", "OTHER"}
+
+
+def test_column_defaults_to_incwage_but_is_reusable_for_another_income_column() -> None:
+    step = TopcodeAdjuster("topcode_adjuster")
+    assert step.required_columns == frozenset({"INCWAGE", "YEAR"})
+    assert step.produced_columns == frozenset({"INCWAGE"})
+
+    df = pl.DataFrame({"YEAR": [1970], "INCBUS": [50000.0]})
+    other_step = TopcodeAdjuster("business_income_topcode", column="INCBUS")
+
+    result, _ = other_step.apply(df, _context())
+
+    assert other_step.required_columns == frozenset({"INCBUS", "YEAR"})
+    assert result["INCBUS"].to_list() == [75000.0]
+
+
+def test_topcode_key_selects_among_multiple_named_instances() -> None:
+    context = CleaningContext(
+        source_profile=SourceProfile(kind="ipums_cps_asec"),
+        topcode={
+            "wage": TopcodeConfig(
+                multiplier=1.5,
+                uncovered_years="skip",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=2000,
+                        end_year=2000,
+                        threshold=1.0,
+                        match_mode="gte",
+                    )
+                ],
+            ),
+            "income": TopcodeConfig(
+                multiplier=2.0,
+                uncovered_years="skip",
+                thresholds=[
+                    YearBandThreshold(
+                        start_year=1996,
+                        end_year=1996,
+                        threshold=100000,
+                        match_mode="gte",
+                    )
+                ],
+            ),
+        },
+    )
+    df = pl.DataFrame({"YEAR": [1996], "INCTOT": [200000.0]})
+    step = TopcodeAdjuster("income_topcode", column="INCTOT", topcode_key="income")
+
+    result, _ = step.apply(df, context)
+
+    assert result["INCTOT"].to_list() == [400000.0]
+
+
+def test_missing_topcode_key_raises_clear_error() -> None:
+    step = TopcodeAdjuster("topcode_adjuster", topcode_key="income")
+    df = pl.DataFrame({"YEAR": [1996], "INCWAGE": [200000.0]})
+
+    with pytest.raises(ValueError, match="income.*available.*wage"):
+        step.apply(df, _context())
+
+
+def test_validate_context_passes_when_topcode_key_present() -> None:
+    step = TopcodeAdjuster("topcode_adjuster", topcode_key="wage")
+
+    assert step.validate_context(_context()) == []
+
+
+def test_validate_context_flags_missing_topcode_key_before_apply() -> None:
+    step = TopcodeAdjuster("topcode_adjuster", topcode_key="income")
+
+    issues = step.validate_context(_context())
+
+    assert len(issues) == 1
+    assert "income" in issues[0]
+    assert "wage" in issues[0]
