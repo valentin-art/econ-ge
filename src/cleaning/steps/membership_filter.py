@@ -28,11 +28,17 @@ class MembershipFilter(Step):
     ) -> tuple[pl.DataFrame, StepReport]:
         # Filtering
         n_in = len(df)
-        result = df.filter(pl.col(self.column).is_in(self.allowed_values))
+        col = pl.col(self.column)
+        n_missing = df.select(col.is_null().sum()).item()
+        result = df.filter(col.is_in(self.allowed_values))
 
-        # Collect info for report
-        dropped = n_in - len(result)
-        dropped_reason_counts = {"not_in_allowed_values": dropped} if dropped else {}
+        dropped_reason_counts: dict[str, int] = {}
+        if n_missing:
+            dropped_reason_counts["missing"] = n_missing
+
+        n_out_of_universe = n_in - len(result) - n_missing
+        if n_out_of_universe:
+            dropped_reason_counts["not_in_allowed_values"] = n_out_of_universe
 
         return result, StepReport(
             step_name=self.name,
