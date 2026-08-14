@@ -30,8 +30,15 @@ class MembershipFilter(Step):
         n_in = len(df)
         col = pl.col(self.column)
         n_missing = df.select(col.is_null().sum()).item()
-        result = df.filter(col.is_in(self.allowed_values))
 
+        try:
+            result = df.filter(col.is_in(self.allowed_values))
+        except pl.exceptions.InvalidOperationError as exc:
+            raise ValueError(
+                f"MembershipFilter {self.name!r}: column {self.column!r} has dtype "
+                f"{df.schema[self.column]} but allowed_values are "
+                f"{ {type(v).__name__ for v in self.allowed_values} }: {exc}"
+            ) from exc
         dropped_reason_counts: dict[str, int] = {}
         if n_missing:
             dropped_reason_counts["missing"] = n_missing
