@@ -10,6 +10,10 @@ from src.cleaning.context import CleaningContext
 
 
 class MembershipFilter(Step):
+    """Keeps rows where `column` is one of `allowed_values`; drops rows
+    where it is null or any other value, reporting the two separately.
+    """
+
     def __init__(
         self, name: str, column: str, allowed_values: Collection[object]
     ) -> None:
@@ -33,7 +37,7 @@ class MembershipFilter(Step):
 
         try:
             result = df.filter(col.is_in(self.allowed_values))
-        except pl.exceptions.InvalidOperationError as exc:
+        except pl.exceptions.PolarsError as exc:
             raise ValueError(
                 f"MembershipFilter {self.name!r}: column {self.column!r} has dtype "
                 f"{df.schema[self.column]} but allowed_values are "

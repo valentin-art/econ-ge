@@ -3,7 +3,7 @@
 import functools
 import importlib
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 import polars as pl
 
@@ -12,12 +12,25 @@ from src.cleaning.context import CleaningContext
 
 _ALLOWED_FUNCTION_PREFIX = "src.cleaning.custom_functions."
 
+# A wrapped function may return either a bare DataFrame, or (df, warnings) so
+# it can surface a silent-failure risk (e.g. an empty fit population) through
+# the same StepReport.warnings channel every other step uses.
+FunctionStepResult = pl.DataFrame | tuple[pl.DataFrame, Sequence[str]]
+
 
 class FunctionStep(Step):
+    """Wraps a plain `(df, context) -> df` (or `-> (df, warnings)`) function
+    as a `Step`, so a one-off transformation doesn't need its own `Step`
+    subclass. `dropped_reason_counts`/`warnings` are inferred generically
+    from the row-count delta and any warnings the function returns - a
+    function that needs a more specific report should still get its own
+    `Step` subclass instead.
+    """
+
     def __init__(
         self,
         name: str,
-        fn: Callable[[pl.DataFrame, CleaningContext], pl.DataFrame],
+        fn: Callable[[pl.DataFrame, CleaningContext], FunctionStepResult],
         required_columns: frozenset[str],
         produced_columns: frozenset[str],
     ) -> None:
@@ -30,16 +43,32 @@ class FunctionStep(Step):
         self, df: pl.DataFrame, context: CleaningContext
     ) -> tuple[pl.DataFrame, StepReport]:
         n_in = len(df)
-        result = self.fn(df, context)
+        returned = self.fn(df, context)
+        result, fn_warnings = (
+            returned if isinstance(returned, tuple) else (returned, [])
+        )
+        if not isinstance(result, pl.DataFrame):
+            raise TypeError(
+                f"FunctionStep {self.name!r}: {self.fn} returned "
+                f"{type(result).__name__}, expected a pl.DataFrame (or "
+                "(pl.DataFrame, warnings))"
+            )
         n_out = len(result)
 
         dropped_reason_counts = {"function_step": n_in - n_out} if n_out < n_in else {}
+        warnings = list(fn_warnings)
+        if n_out > n_in:
+            warnings.append(
+                f"{self.name} added {n_out - n_in} rows (n_in={n_in}, n_out={n_out}); "
+                "check for join fan-out"
+            )
 
         return result, StepReport(
             step_name=self.name,
             n_in=n_in,
             n_out=n_out,
             dropped_reason_counts=dropped_reason_counts,
+            warnings=warnings,
         )
 
 
@@ -61,7 +90,7 @@ def _resolve_function_step(
     module_path, _, attr_name = function.rpartition(".")
     if not module_path:
         raise ValueError(
-            f"_build_function_step: {function!r} is not a valid dotted path "
+            f"FunctionStep {name!r}: {function!r} is not a valid dotted path "
             "(expected 'module.submodule.function_name')"
         )
     if not function.startswith(allowed_prefixes):
@@ -75,7 +104,7 @@ def _resolve_function_step(
         fn = getattr(module, attr_name)
     except (ImportError, AttributeError) as exc:
         raise ValueError(
-            f"_build_function_step: could not resolve {function!r}: {exc}"
+            f"FunctionStep {name!r}: could not resolve {function!r}: {exc}"
         ) from exc
 
     if not callable(fn):
