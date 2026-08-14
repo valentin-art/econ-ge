@@ -153,15 +153,20 @@ class Pipeline:
         name: str,
         validate_between_steps: bool = False,
         known_input_columns: frozenset[str] = frozenset(),
+        fail_on_warning: bool = False,
     ) -> None:
         self.steps = steps
         self.name = name
         self.validate_between_steps = validate_between_steps
         self.known_input_columns = known_input_columns
+        self.fail_on_warning = fail_on_warning
 
     @classmethod
     def from_config(
-        cls, config_path: Path, registry: Mapping[str, Callable[..., Step]]
+        cls,
+        config_path: Path,
+        registry: Mapping[str, Callable[..., Step]],
+        fail_on_warning=False,
     ) -> Pipeline:
         """Build a Pipeline from a YAML file: `name`, `known_input_columns`,
         `validate_between_steps`, and a `steps` list of blocks, each
@@ -232,6 +237,7 @@ class Pipeline:
             name=raw.get("name", config_path.stem),
             validate_between_steps=raw.get("validate_between_steps", False),
             known_input_columns=frozenset(raw.get("known_input_columns", [])),
+            fail_on_warning=fail_on_warning,
         )
         pipeline._source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -308,13 +314,28 @@ class Pipeline:
                         f"returned a frame with {len(current)} rows"
                     )
             reports.append(report)
+
+            # Log and raise warnings
             logger.info(
                 "cleaning_step_applied",
                 pipeline=self.name,
                 step=step.name,
                 n_in=report.n_in,
                 n_out=report.n_out,
+                dropped=report.dropped_reason_counts,
+                branches=report.branches_taken,
             )
+            for warning in report.warnings:
+                logger.warning(
+                    "cleaning_step_warning",
+                    pipeline=self.name,
+                    step=step.name,
+                    warning=warning,
+                )
+                if self.fail_on_warning:  # new __init__ flag, default False
+                    raise ValueError(
+                        f"step {step.name!r} in pipeline {self.name!r} warned: {warning}"
+                    )
         finished_at = datetime.now(tz=UTC)
         run_report = RunReport(
             pipeline_name=self.name,
