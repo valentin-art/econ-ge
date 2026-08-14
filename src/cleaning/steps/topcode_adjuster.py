@@ -93,8 +93,10 @@ class TopcodeAdjuster(Step):
         uncovered = df.filter(pl.col("_topcode_mode").is_null())
 
         # Count topcode modes
-        exact_match = df.filter(pl.col("_topcode_mode") == "exact").height
-        gte_match = df.filter(pl.col("_topcode_mode") == "gte").height
+        hit = pl.col("_topcode_hit").fill_null(False)
+        exact_adjusted = df.filter(hit & (pl.col("_topcode_mode") == "exact")).height
+        gte_adjusted = df.filter(hit & (pl.col("_topcode_mode") == "gte")).height
+        in_band_not_hit = df.filter(~hit & pl.col("_topcode_mode").is_not_null()).height
         no_threshold = uncovered.height
         if no_threshold and cfg.uncovered_years == "error":
             years = sorted(uncovered["YEAR"].unique().to_list())
@@ -116,8 +118,9 @@ class TopcodeAdjuster(Step):
             n_in=n_in,
             n_out=n_in,
             branches_taken={
-                "exact_match": exact_match,
-                "gte_match": gte_match,
+                "exact_match": exact_adjusted,
+                "gte_match": gte_adjusted,
+                "in_band_not_hit": in_band_not_hit,
                 "no_threshold_for_year": no_threshold,
             },
         )
