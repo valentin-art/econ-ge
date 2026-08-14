@@ -25,18 +25,23 @@ def run_cps_cleaning_example(year: int = 2019) -> pl.DataFrame:
     )
     pipeline = Pipeline.from_config(config_dir / "pipeline.yaml", STEP_BUILDERS)
 
-    issues = pipeline.validate_compatibility()
+    issues = pipeline.validate_compatibility() + pipeline.validate_against_context(
+        context
+    )
     if issues:
         raise ValueError(f"pipeline.yaml is not internally consistent: {issues}")
 
     bronze_file = settings.paths.ipums_bronze_dir("cps") / f"{year}.parquet"
-    df = pl.read_parquet(bronze_file)
+    # Lazy scan: Pipeline.apply() accepts a LazyFrame and collects it once,
+    # in full (no column pushdown - the result is meant to carry every
+    # bronze column through, not just what the cleaning steps touch).
+    lf = pl.scan_parquet(bronze_file)
 
-    result, run_report = pipeline.apply(df, context)
+    result, run_report = pipeline.apply(lf, context)
     log.info(
         "cps_cleaning_example_complete",
         year=year,
-        n_in=df.height,
+        n_in=run_report.steps[0].n_in if run_report.steps else result.height,
         n_out=result.height,
         steps=[step.step_name for step in run_report.steps],
     )
