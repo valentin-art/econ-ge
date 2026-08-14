@@ -35,7 +35,7 @@ def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.Data
     independent of the fit.
     """
 
-    TEMP = "__bracket_mean_tmp__"
+    TEMP = "_bracket_mean"
     if TEMP in df.columns:
         raise ValueError(
             f"bridge_weeks_pre_1976: input already has reserved column {TEMP!r}"
@@ -43,26 +43,16 @@ def bridge_weeks_pre_1976(df: pl.DataFrame, context: CleaningContext) -> pl.Data
     group_means = (
         df.filter(pl.col("YEAR").is_between(1976, 1978))
         .group_by(["FEMALE", "RACE", "WKSWORK2"])
-        .agg(pl.col("WKSWORK1").mean().cast(pl.Float64).alias("_bracket_mean"))
+        .agg(pl.col("WKSWORK1").mean().cast(pl.Float64).alias(TEMP))
     )
 
-    if group_means.is_empty():
-        raise ValueError(
-            "bridge_weeks_pre_1976: no 1976-1978 rows in the input frame to fit "
-            "bracket means from; every pre-1976 WEEKS_WORKED would be null"
-        )
     return (
         df.join(group_means, on=["FEMALE", "RACE", "WKSWORK2"], how="left")
         .with_columns(
             pl.when(pl.col("YEAR") < 1976)
-            .then(
-                pl.coalesce(
-                    [pl.col("WKSWORK1").cast(pl.Float64), pl.col("_bracket_mean")]
-                )
-            )
+            .then(pl.coalesce([pl.col("WKSWORK1").cast(pl.Float64), pl.col(TEMP)]))
             .otherwise(pl.col("WKSWORK1").cast(pl.Float64))
             .alias("WEEKS_WORKED")
         )
-        .drop("_bracket_mean")
         .drop(TEMP)
     )
