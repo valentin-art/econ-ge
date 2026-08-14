@@ -132,6 +132,26 @@ class TopcodeConfig(BaseModel):
         data["thresholds"] = thresholds
         return data
 
+    @model_validator(mode="after")
+    def _check_bands(self) -> TopcodeConfig:
+        if not self.thresholds:
+            raise ValueError(
+                "TopcodeConfig: `thresholds` is empty - the adjuster would silently "
+                "no-op on every row. Provide `bands:` and/or `per_year:`."
+            )
+        spans = sorted((t.start_year, t.end_year) for t in self.thresholds)
+        for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+            if s1 > e1:
+                raise ValueError(
+                    f"TopcodeConfig: band {s1}-{e1} has start_year > end_year"
+                )
+            if s2 <= e1:
+                raise ValueError(
+                    f"TopcodeConfig: overlapping bands {s1}-{e1} and {s2}-{e2}; "
+                    "band precedence would be silently order-dependent"
+                )
+        return self
+
 
 class CleaningContext(BaseModel):
     """Immutable, versioned methodology configuration for one cleaning run.
