@@ -105,11 +105,13 @@ class TopcodeAdjuster(Step):
                 f"threshold band for survey year(s) {years}; {no_threshold} rows would pass "
                 "through unadjusted. Extend the config or set uncovered_years: skip."
             )
-        # Apply multiplier
+        # Apply multiplier. cfg.multiplier is a float, so the multiplied
+        # branch is inherently Float64 - cast both branches explicitly
+        # rather than let `otherwise` silently upcast the whole column.
         result = df.with_columns(
             pl.when(pl.col("_topcode_hit"))
-            .then(income * cfg.multiplier)
-            .otherwise(income)
+            .then(income.cast(pl.Float64) * cfg.multiplier)
+            .otherwise(income.cast(pl.Float64))
             .alias(self.column)
         ).drop(["_topcode_hit", "_topcode_mode"])
 

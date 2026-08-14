@@ -32,7 +32,7 @@ class TopcodeCapFilter(Step):
             n_out=n_in,
             branches_taken={
                 "topcoded": topcoded,
-                "unchanged": n_in - topcoded,
+                "unchanged": n_in - topcoded - n_missing,
                 "missing": n_missing,
             },
         )
