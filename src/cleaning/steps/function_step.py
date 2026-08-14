@@ -2,6 +2,7 @@
 
 import functools
 import importlib
+import inspect
 from collections.abc import Callable, Mapping
 
 import polars as pl
@@ -71,8 +72,31 @@ def _build_function_step(
             f"_build_function_step: could not resolve {function!r}: {exc}"
         ) from exc
 
+    if not callable(fn):
+        raise TypeError(
+            f"FunctionStep {name!r}: {function!r} resolved to {type(fn).__name__}, which is not callable"
+        )
+    signature = inspect.signature(fn)
     if params:
+        try:
+            signature.bind_partial(**params)
+        except TypeError as exc:
+            raise ValueError(
+                f"FunctionStep {name!r}: params {sorted(params)} do not match "
+                f"{function}{signature}: {exc}"
+            ) from exc
         fn = functools.partial(fn, **params)
+    remaining = [
+        p
+        for p in inspect.signature(fn).parameters.values()
+        if p.default is p.empty
+        and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(remaining) != 2:
+        raise ValueError(
+            f"FunctionStep {name!r}: {function} must accept (df, context) after "
+            f"params are bound; got {signature}"
+        )
 
     return FunctionStep(
         name=name,
