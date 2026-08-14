@@ -3,7 +3,7 @@ data-cleaning layer.
 
 Classes:
     Pipeline:
-        implements cleaning pipleline as a sequence of steps.
+        implements cleaning pipeline as a sequence of steps.
     Step:
         Individual steps (wrapper for a cleaning function).
     NoOpStep:
@@ -63,12 +63,12 @@ class Step(ABC):
     """Atomic cleaning step, e.g. an age-band restriction
     or a topcode adjustment.
 
-    `requred_columns` and `produced_columns` are used to validate
-    step inputs and outputs. `is_idempotent` ensures the step
-    does not produce
+    `required_columns` and `produced_columns` are used to validate
+    step inputs and outputs. `is_idempotent` declares whether re-applying
+    this step to its own output would change the result.
 
     Attributes:
-        requred_columns (frozenset[str]):
+        required_columns (frozenset[str]):
             Helps to validate step input.
         produced_columns (frozenset[str]):
             Helps to validate step output
@@ -125,27 +125,36 @@ class Pipeline:
         validate_between_steps (bool):
             A flag whether validate required/produced columns of each step,
             as well as steps consistency
-        known_unput_columns (frozenset[str]):
+        known_input_columns (frozenset[str]):
             Used to check whether sets have all columns required to complete
             the Pipeline.
 
     Methods:
         from_config(...):
-            Opens the Pipepline (i.e., all Steps with definitions) from
+            Opens the Pipeline (i.e., all Steps with definitions) from
             a config (yaml) file. Checks that all Steps are defined and can
             be initialized.
         validate_compatibility(...):
-            Checks all requred and produced columns are compatible on each
+            Checks all required and produced columns are compatible on each
             step.
         validate_against_context(...):
             Checks each step's declared context dependencies (e.g. a
             named sub-context key) actually exist on a given context.
         apply(...):
-            Applies steps one-by-one, returns cleaned dataset and cleanin
-            report.
+            Applies steps one-by-one, returns cleaned dataset and cleaning
+            report. Accepts a `pl.LazyFrame` (e.g. from `pl.scan_parquet`)
+            as well as a `pl.DataFrame`, so a caller can compose lazy
+            row-level operations (a `.filter()`, a `scan_parquet` glob over
+            several files) before handing off - `apply()` collects once, in
+            full, with no column projection: `known_input_columns` is a
+            *minimum*-columns compatibility check (`validate_compatibility`),
+            not the pipeline's promised output schema, so it must not be
+            used to decide what to drop - the source's other columns
+            (survey weights, record IDs, ...) are exactly what a caller
+            typically still wants in the result. See the note on `apply()`
+            for why a full Step-level LazyFrame protocol wouldn't buy more
+            than accepting a LazyFrame at the boundary already does.
     """
-
-    _source_hash: str | None = None
 
     def __init__(
         self,
@@ -154,19 +163,21 @@ class Pipeline:
         validate_between_steps: bool = False,
         known_input_columns: frozenset[str] = frozenset(),
         fail_on_warning: bool = False,
+        source_hash: str | None = None,
     ) -> None:
         self.steps = steps
         self.name = name
         self.validate_between_steps = validate_between_steps
         self.known_input_columns = known_input_columns
         self.fail_on_warning = fail_on_warning
+        self.source_hash = source_hash
 
     @classmethod
     def from_config(
         cls,
         config_path: Path,
         registry: Mapping[str, Callable[..., Step]],
-        fail_on_warning=False,
+        fail_on_warning: bool | None = None,
     ) -> Pipeline:
         """Build a Pipeline from a YAML file: `name`, `known_input_columns`,
         `validate_between_steps`, and a `steps` list of blocks, each
@@ -187,10 +198,16 @@ class Pipeline:
             ValueError if config file has unknown or invalid steps.
         """
         text = config_path.read_text()
-        # Laod config file
+        # Load config file
         raw = yaml.safe_load(text) or {}
 
-        known_keys = {"name", "steps", "validate_between_steps", "known_input_columns"}
+        known_keys = {
+            "name",
+            "steps",
+            "validate_between_steps",
+            "known_input_columns",
+            "fail_on_warning",
+        }
         unknown = set(raw) - known_keys
         if unknown:
             raise ValueError(
@@ -231,16 +248,19 @@ class Pipeline:
                     f"Pipeline.from_config: {config_path} step {step_name!r} "
                     f"(type={type_name!r}) failed to construct: {exc}"
                 ) from exc
-        pipeline = cls(
+        return cls(
             steps=steps,
             name=raw.get("name", config_path.stem),
             validate_between_steps=raw.get("validate_between_steps", False),
             known_input_columns=frozenset(raw.get("known_input_columns", [])),
-            fail_on_warning=fail_on_warning,
+            # An explicit constructor argument wins; otherwise the YAML decides.
+            fail_on_warning=(
+                raw.get("fail_on_warning", False)
+                if fail_on_warning is None
+                else fail_on_warning
+            ),
+            source_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
-        pipeline._source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-        return pipeline
 
     def validate_compatibility(self) -> list[str]:
         """Is each step's required_columns satisfied by `known_input_columns`
@@ -277,11 +297,35 @@ class Pipeline:
         return issues
 
     def apply(
-        self, df: pl.DataFrame, context: CleaningContext
+        self, df: pl.DataFrame | pl.LazyFrame, context: CleaningContext
     ) -> tuple[pl.DataFrame, RunReport]:
+        """Runs `df` through every step in order.
+
+        `df` may be a `pl.LazyFrame` (e.g. `pl.scan_parquet(path)` instead
+        of `pl.read_parquet(path)`, or a lazily-filtered/-projected frame a
+        caller built themselves) - `apply()` collects it once, in full,
+        before the first step. Individual `Step`s still take and return
+        `pl.DataFrame` rather than `pl.LazyFrame`: every step's
+        `StepReport` needs concrete counts (rows dropped, branches taken),
+        which forces a materialization at each step boundary regardless of
+        the type used there, so threading `pl.LazyFrame` through the whole
+        chain wouldn't fuse operations across steps - only defer the same
+        unavoidable per-step collect to a slightly different line. Any
+        column pushdown belongs in what the *caller* passes in (e.g.
+        `pl.scan_parquet(path).select(wanted_columns)`), not here:
+        `known_input_columns` is a minimum-columns check, not the
+        pipeline's output schema, so `apply()` must not use it to decide
+        what to drop.
+        """
+        context_issues = self.validate_against_context(context)
+        if context_issues:
+            raise ValueError(
+                f"pipeline {self.name!r} is not compatible with the given "
+                f"context: {context_issues}"
+            )
         started_at = datetime.now(tz=UTC)
         reports: list[StepReport] = []
-        current = df
+        current = df.collect() if isinstance(df, pl.LazyFrame) else df
         for step in self.steps:
             missing = step.required_columns - set(current.columns)
             if missing:
@@ -342,6 +386,6 @@ class Pipeline:
             context_hash=context.compute_hash(),
             started_at=started_at,
             finished_at=finished_at,
-            pipeline_hash=getattr(self, "_source_hash", None),
+            pipeline_hash=self.source_hash,
         )
         return current, run_report
