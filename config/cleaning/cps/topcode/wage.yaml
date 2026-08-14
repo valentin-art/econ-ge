@@ -1,0 +1,49 @@
+# TopcodeAdjuster (src/cleaning/steps/topcode_adjuster.py).
+# Example: IPUMS CPS top codes
+
+multiplier: 1.5
+uncovered_years: skip
+# Pre-1988: exact-equality match against a year-banded threshold (applied
+# by TopcodeAdjuster, not encoded here - both blocks below fold into one
+# `thresholds` list on load; see TopcodeConfig).
+bands:
+  - start_year: 1962
+    end_year: 1964
+    threshold: 90000
+  - start_year: 1965
+    end_year: 1967
+    threshold: 99900
+  - start_year: 1968
+    end_year: 1981
+    threshold: 50000
+  - start_year: 1982
+    end_year: 1984
+    threshold: 75000
+  - start_year: 1985
+    end_year: 1987
+    threshold: 99999
+
+# 1988+: >= match against a per-year threshold (aa_clean's MAXWG scalar).
+per_year:
+  1988: 99999
+  1989: 95000
+  1990: 99999
+  1991: 90000
+  1992: 99999
+  1993: 99999
+  1994: 99999
+  1995: 99999
+  1996: 25000
+  1997: 25000
+  1998: 25000
+  1999: 25000
+  2000: 25000
+  2001: 25000
+  2002: 25000
+  2003: 35000
+  2004: 35000
+  2005: 35000
+  2006: 35000
+  2007: 35000
+  2008: 35000
+  2009: 35000
