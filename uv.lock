@@ -632,6 +632,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "ruff" },
     { name = "structlog" },
     { name = "types-requests" },
 ]
@@ -674,6 +675,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.33.1" },
+    { name = "ruff", specifier = ">=0.15.12" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "structlog", specifier = ">=24.0" },
     { name = "types-requests", specifier = ">=2.33.0.20260518" },

@@ -1,11 +1,11 @@
-# DeflatorMergeStep (src/cleaning/steps/deflator_merge.py).
-# CPI deflator, 2008$, transcribed exactly from
-# src.harmonization.cps_tables.CPI_DEFLATOR (aa_clean/cpi.do); that module
-# stays the source of truth to edit from - regenerate this file from it
-# rather than hand-editing values here. No 1962 entry in the source (a gap
-# in the original .do file); no entry past 2008 (aa_clean's own table ends
-# there) - both are covered by uncovered_years: skip below.
-uncovered_years: skip
+# Used by DeflatorMergeStep.
+#
+# Valid fieds:
+#   uncovered years: warning or error
+#     Tells what to do if data has more years than the CPI data.
+#   values: {YEAR: VALUE}
+#     Deflator values by years. Base year should equal to 1.
+uncovered_years: warning
 values:
   1961: 6.624615384615385
   1963: 6.465465465465466

@@ -1,10 +1,11 @@
-# DeflatorMergeStep (src/cleaning/steps/deflator_merge.py).
-# GDP personal-consumption-expenditure deflator, 2008$, transcribed exactly
-# from src.harmonization.cps_tables.GDP_PCE_DEFLATOR (aa_clean/gdpmar.do);
-# that module stays the source of truth to edit from - regenerate this file
-# from it rather than hand-editing values here. No 1962 entry in the
-# source; no entry past 2008 - both covered by uncovered_years: skip below.
-uncovered_years: skip
+# Used by DeflatorMergeStep.
+#
+# Valid fieds:
+#   uncovered years: warning or error
+#     Tells what to do if data has more years than the daflator data.
+#   values: {YEAR: VALUE}
+#     Deflator values by years. Base year should equal to 1.
+uncovered_years: warning
 values:
   1961: 5.799212807829371
   1963: 5.665419589503768

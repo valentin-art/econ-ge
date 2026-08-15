@@ -188,7 +188,7 @@ def test_validate_against_context_passes_when_step_dependency_exists() -> None:
         source_profile=SourceProfile(kind="ipums_cps_asec"),
         topcode={
             "wage": TopcodeConfig(
-                uncovered_years="skip",
+                uncovered_years="warning",
                 thresholds=[
                     YearBandThreshold(
                         start_year=2000,

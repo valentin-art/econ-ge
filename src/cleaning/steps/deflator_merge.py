@@ -113,6 +113,6 @@ class DeflatorMergeStep(Step):
             raise ValueError(
                 f"DeflatorMergeStep {self.name!r}: {message}; extend "
                 f"config/cleaning/cps/deflators/{key}.yaml or set "
-                "uncovered_years: skip there"
+                "uncovered_years: warning there"
             )
         warnings.append(message)

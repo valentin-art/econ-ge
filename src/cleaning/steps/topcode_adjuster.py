@@ -19,11 +19,8 @@ from src.cleaning.context import CleaningContext
 class TopcodeAdjuster(Step):
     """Adjusts topcodes given the context.
 
-    Threshold bands are matched on the survey `YEAR` (not the income year
-    `YEAR-1` that `DeflatorMergeStep` keys on) - see the comment in `apply`.
-    `column` is always returned as Float64, whatever it came in as, since the
-    multiplier is a float; the promotion is unconditional so that the output
-    schema does not depend on whether a given batch contained a topcoded row.
+    Threshold bands are matched on the survey `YEAR`. Column is always returned
+    as Float64.
 
     Attributes:
         name (str):
@@ -59,8 +56,10 @@ class TopcodeAdjuster(Step):
         if self.topcode_key in context.topcode:
             return []
         return [
-            f"no topcode config named {self.topcode_key!r} in context.topcode "
-            f"(available: {sorted(context.topcode)})"
+            (
+                f"no topcode config named {self.topcode_key!r} in context.topcode "
+                f"(available: {sorted(context.topcode)})"
+            )
         ]
 
     _RESERVED_COLUMNS = ("_topcode_hit", "_topcode_mode")
@@ -88,13 +87,6 @@ class TopcodeAdjuster(Step):
         mode_expr = pl.lit(None, dtype=pl.Utf8)
 
         # For each row, set a dummy if a threshold (topcode) is reached.
-        # Bands are matched on the survey YEAR, NOT on the income year
-        # (YEAR-1) that DeflatorMergeStep uses. That asymmetry is deliberate:
-        # the thresholds are transcribed from per-survey-year blocks of
-        # aa_clean/clean7909km.do (see src.harmonization.cps_tables), so
-        # survey-year matching is the faithful port. "Fixing" this to YEAR-1
-        # for consistency with the deflators would silently shift every
-        # threshold by one year.
         for band in cfg.thresholds:
             band_match = pl.col("YEAR").is_between(band.start_year, band.end_year)
             band_hit = (
@@ -123,9 +115,7 @@ class TopcodeAdjuster(Step):
         in_band_not_hit = df.filter(~hit & in_band & ~income_is_null).height
         no_threshold = uncovered.height
 
-        # A null YEAR matches no band, so those rows land in `uncovered` too -
-        # but they are a different defect from "this year has no band yet", and
-        # mixing None into the year list would make `sorted` raise TypeError.
+        # A null YEAR matches no band, so those rows land in `uncovered` too
         n_null_year = df.select(pl.col("YEAR").is_null().sum()).item()
         years = sorted(
             year for year in uncovered["YEAR"].unique().to_list() if year is not None
@@ -146,19 +136,11 @@ class TopcodeAdjuster(Step):
             if cfg.uncovered_years == "error":
                 raise ValueError(
                     f"TopcodeAdjuster {self.name!r}: {message}. Extend the config "
-                    "or set uncovered_years: skip."
+                    "or set uncovered_years: warning."
                 )
-            # Mirror DeflatorMergeStep: an uncovered year is never a silent
-            # pass-through, it is always visible in the StepReport.
             warnings.append(message)
 
-        # Apply multiplier. cfg.multiplier is a float, so the multiplied branch
-        # is inherently Float64 - cast BOTH branches explicitly rather than let
-        # `otherwise` silently upcast. The cast is deliberately unconditional:
-        # the output dtype is then a property of the step, not of whether this
-        # particular batch happened to contain a topcoded row. Emitting a
-        # warning for it would fire on every run under an integer input column
-        # and would make `Pipeline(fail_on_warning=True)` permanently unusable.
+        # Apply multiplier
         result = df.with_columns(
             pl.when(pl.col("_topcode_hit"))
             .then(income.cast(pl.Float64) * cfg.multiplier)

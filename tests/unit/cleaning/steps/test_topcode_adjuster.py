@@ -16,7 +16,7 @@ def _context() -> CleaningContext:
         topcode={
             "wage": TopcodeConfig(
                 multiplier=1.5,
-                uncovered_years="skip",
+                uncovered_years="warning",
                 thresholds=[
                     YearBandThreshold(
                         start_year=1968,
@@ -117,7 +117,7 @@ def test_topcode_key_selects_among_multiple_named_instances() -> None:
         topcode={
             "wage": TopcodeConfig(
                 multiplier=1.5,
-                uncovered_years="skip",
+                uncovered_years="warning",
                 thresholds=[
                     YearBandThreshold(
                         start_year=2000,
@@ -129,7 +129,7 @@ def test_topcode_key_selects_among_multiple_named_instances() -> None:
             ),
             "income": TopcodeConfig(
                 multiplier=2.0,
-                uncovered_years="skip",
+                uncovered_years="warning",
                 thresholds=[
                     YearBandThreshold(
                         start_year=1996,
@@ -215,8 +215,8 @@ def test_output_dtype_does_not_depend_on_whether_a_row_was_topcoded() -> None:
     assert hit_result.schema["INCWAGE"] == miss_result.schema["INCWAGE"] == pl.Float64
 
 
-def test_uncovered_year_warns_when_configured_to_skip() -> None:
-    # Under `skip` an uncovered year must still leave a trace in the report -
+def test_uncovered_year_warns_when_configured_to_warn() -> None:
+    # Under `warning` an uncovered year must still leave a trace in the report -
     # a silent pass-through is exactly the failure mode the policy exists to
     # avoid. DeflatorMergeStep already behaves this way.
     df = pl.DataFrame({"YEAR": [1970, 2015], "INCWAGE": [50000.0, 200000.0]})

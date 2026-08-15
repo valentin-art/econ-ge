@@ -31,20 +31,76 @@ from collections.abc import Mapping
 from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Annotated, Literal
 
 import polars as pl
+import structlog
 import yaml
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_serializer,
     model_validator,
 )
 
+log = structlog.get_logger(__name__)
+
 SourceKind = Literal["ipums_cps_asec", "nber_mw", "raw_asec_march", "psid"]
+
+UncoveredYearsPolicy = Literal["error", "warning"]
+"""What a sub-context with year keys does when it meets a year it does not cover.
+
+Values:
+    "error": The step raises error.
+    "warning": The step records a StepReport warning and passes the rows
+        through unchanged.
+
+A Pipeline with `fail_on_warning=True` escalates that warning back into
+a failure, so run-level strictness stays a separate, composable decision from
+this per-table methodology one.
+
+Anything else falls back to "error" (fail closed) and is reported in logs.
+Missing field raises an error `Field required`.
+"""
+
+_UNCOVERED_YEARS_POLICIES: frozenset[str] = frozenset({"error", "warning"})
+_UNCOVERED_YEARS_FALLBACK: UncoveredYearsPolicy = "error"
+
+# Added for consistensy with prev versions: `skip` was renamed to `warning`
+_UNCOVERED_YEARS_RENAMED: dict[str, UncoveredYearsPolicy] = {"skip": "warning"}
+
+
+def _coerce_uncovered_years(value: object, info: ValidationInfo) -> object:
+    """Fail closed on an unreadable `uncovered_years`, and say so in the log."""
+
+    if isinstance(value, str):
+        if value in _UNCOVERED_YEARS_POLICIES:
+            return value
+        if value in _UNCOVERED_YEARS_RENAMED:
+            raise ValueError(
+                f"uncovered_years={value!r} was renamed to "
+                f"{_UNCOVERED_YEARS_RENAMED[value]!r}; update the config. This is "
+                "rejected rather than defaulted to 'error' deliberately - "
+                "defaulting would silently make a tolerant config strict."
+            )
+    log.warning(
+        "uncovered_years_coerced",
+        source=(info.context or {}).get("source", "<constructed in memory>"),
+        given=repr(value),
+        given_type=type(value).__name__,
+        using=_UNCOVERED_YEARS_FALLBACK,
+        allowed=sorted(_UNCOVERED_YEARS_POLICIES),
+    )
+    return _UNCOVERED_YEARS_FALLBACK
+
+
+UncoveredYears = Annotated[
+    UncoveredYearsPolicy, BeforeValidator(_coerce_uncovered_years)
+]
 
 
 class SourceProfile(BaseModel):
@@ -93,18 +149,15 @@ class TopcodeConfig(BaseModel):
     """Multiplier + year-banded thresholds for one income column's topcode
     adjustment (see `TopcodeAdjuster`).
 
-    Authoring shorthand: raw YAML may supply either (or both) of `bands` (a
-    list of `{start_year, end_year, threshold}` blocks, folded in as
-    `match_mode="exact"`) and `per_year` (a compact `{year: value}` mapping,
-    folded in one entry per year as `match_mode="gte"`) - see
-    `_fold_threshold_blocks`. Both fold into the single `thresholds` list;
-    neither `bands` nor `per_year` survives as a field on the built model.
+    Raw subcontext YAML file should have one of two block/field types:
+     - Bands: {start_year, end_year, threshold}-blocks (match_mode="exact")
+     - Per-year records:{year: value} mapping (match_mode="gte").
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     multiplier: float = 1.0
     thresholds: tuple[YearBandThreshold, ...] = Field(default_factory=tuple)
-    uncovered_years: Literal["error", "skip"]
+    uncovered_years: UncoveredYears
 
     @model_validator(mode="before")
     @classmethod
@@ -163,15 +216,11 @@ class TopcodeConfig(BaseModel):
 
 
 class DeflatorTableConfig(BaseModel):
-    """One year-keyed deflator table (income year -> multiplier), e.g. CPI
-    or GDP-PCE (see `DeflatorMergeStep`). `uncovered_years` mirrors
-    `TopcodeConfig`'s policy: an income year absent from `values` is either
-    a raised error or a per-row warning, never a silent null.
-    """
+    """One year-keyed deflator table."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
     values_: dict[int, float] = Field(alias="values")
-    uncovered_years: Literal["error", "skip"]
+    uncovered_years: UncoveredYears
 
     @model_validator(mode="after")
     def _check_values(self) -> DeflatorTableConfig:
@@ -305,7 +354,7 @@ class CleaningContext(BaseModel):
                 raw_topcode = yaml.safe_load(topcode_path.read_text()) or {}
                 try:
                     topcode[topcode_path.stem] = TopcodeConfig.model_validate(
-                        raw_topcode
+                        raw_topcode, context={"source": str(topcode_path)}
                     )
                 except ValidationError as exc:
                     raise ValueError(
@@ -321,7 +370,7 @@ class CleaningContext(BaseModel):
                 raw_deflator = yaml.safe_load(deflator_path.read_text()) or {}
                 try:
                     deflators[deflator_path.stem] = DeflatorTableConfig.model_validate(
-                        raw_deflator
+                        raw_deflator, context={"source": str(deflator_path)}
                     )
                 except ValidationError as exc:
                     raise ValueError(
@@ -345,12 +394,13 @@ class CleaningContext(BaseModel):
     def compute_hash(self) -> str:
         """A stable hash of this context's methodology.
 
-        - Excludes `run_id` (a run identifier, not a methodology).
-        - `crosswalks` (arbitrary-type `pl.DataFrame` values) is dumped via
-          each table's own row contents rather than the automatic JSON dump.
-        - `available_flags` is a `frozenset`; its `model_dump(mode="json")`
-          ordering follows `PYTHONHASHSEED` and is re-sorted here so the
-          hash identifies the methodology, not the interpreter instance.
+        The hash:
+            - Excludes `run_id` (a run identifier, not a methodology).
+            - Crosswalks are dumped via each table's own row contents rather
+                than the automatic JSON dump.
+            - Available_flags is a frozenset: its `model_dump(mode="json")`
+                ordering follows `PYTHONHASHSEED` and is re-sorted here so the
+                hash identifies the methodology, not the interpreter instance.
         """
         run_metadata = self.run_metadata.model_dump(mode="json")
         run_metadata.pop("run_id", None)
@@ -395,8 +445,10 @@ class CleaningContext(BaseModel):
     ) -> dict[str, list[dict]]:
         """`pl.DataFrame` is an arbitrary type, so pydantic cannot serialize it
         on its own and `model_dump(mode="json")` raises the moment any crosswalk
-        is loaded. Emit row dicts instead, so a context built by `from_config`
-        stays dumpable (Dagster metadata, run manifests, debugging).
+        is loaded.
+
+        Emit row dicts instead, so a context built by `from_config` stays dumpable
+        (Dagster metadata, run manifests, debugging).
         """
         return {name: table.to_dicts() for name, table in crosswalks.items()}
 

@@ -1,13 +1,19 @@
 import polars as pl
 import pytest
 
-from src.cleaning.context import CleaningContext, DeflatorTableConfig, SourceProfile
+from src.cleaning.context import (
+    CleaningContext,
+    DeflatorTableConfig,
+    SourceProfile,
+    UncoveredYearsPolicy,
+)
 from src.cleaning.steps.deflator_merge import DeflatorMergeStep
 from src.harmonization.cps_tables import CPI_DEFLATOR, GDP_PCE_DEFLATOR
 
 
 def _context(
-    cpi_uncovered_years: str = "skip", gdp_uncovered_years: str = "skip"
+    cpi_uncovered_years: UncoveredYearsPolicy = "warning",
+    gdp_uncovered_years: UncoveredYearsPolicy = "warning",
 ) -> CleaningContext:
     return CleaningContext(
         source_profile=SourceProfile(kind="ipums_cps_asec"),
@@ -66,8 +72,12 @@ def test_custom_keys_select_among_multiple_named_tables() -> None:
     context = CleaningContext(
         source_profile=SourceProfile(kind="ipums_cps_asec"),
         deflators={
-            "cpi_alt": DeflatorTableConfig(values={1982: 2.0}, uncovered_years="skip"),
-            "gdp_alt": DeflatorTableConfig(values={1982: 3.0}, uncovered_years="skip"),
+            "cpi_alt": DeflatorTableConfig(
+                values={1982: 2.0}, uncovered_years="warning"
+            ),
+            "gdp_alt": DeflatorTableConfig(
+                values={1982: 3.0}, uncovered_years="warning"
+            ),
         },
     )
     df = pl.DataFrame({"YEAR": [1983]})

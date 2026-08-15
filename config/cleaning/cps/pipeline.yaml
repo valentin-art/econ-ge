@@ -1,6 +1,13 @@
 name: cps_universe_and_topcode
 known_input_columns: [AGE, CLASSWLY, YEAR, INCWAGE]
 validate_between_steps: true
+
+# Run-level strictness (separate from  `uncovered_years` methodology policy).
+#  - false is the gaps this pipeline are documented  (e.g., CPI/GDP-PCE tables
+#    have no 1962 entry and stop at 2008.
+#  - true for a run that should abort on any step warning.
+fail_on_warning: false
+
 steps:
   - name: age_band_filter
     type: BandFilter

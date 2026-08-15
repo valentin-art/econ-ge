@@ -1,8 +1,20 @@
-# TopcodeAdjuster (src/cleaning/steps/topcode_adjuster.py).
-# Example: IPUMS CPS top codes
-
+# Used by TopcodeAdjuster (src/cleaning/steps/topcode_adjuster.py).
+#
+# Valid fields
+#   multiplier: FLOAT
+#     What the top values multiply on
+#   uncovered_years: warning or year
+#     Tells what to do if data has more years than the daflator data.
+#   bands:
+#     A block corresponding to year bands with the same topcode (threshold).
+#     (See below). Follow "exact match" policy.
+#   per_year:
+#     A block corrsponding to single-year topcodes (See below). Follow
+#     "gte" policy (values above topcodes are topped).
+#
+# The values below are taken from Acemoglu and Autor (2008) cleaning procedures.
 multiplier: 1.5
-uncovered_years: skip
+uncovered_years: warning
 # Pre-1988: exact-equality match against a year-banded threshold (applied
 # by TopcodeAdjuster, not encoded here - both blocks below fold into one
 # `thresholds` list on load; see TopcodeConfig).
