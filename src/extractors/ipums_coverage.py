@@ -3,11 +3,25 @@ checked against the .dat.gz/.xml files it references), which samples and
 variables a collection already has on disk, and plans the minimal set of new
 extracts needed to satisfy a bigger request.
 
-Pure and network-free - operates only on manifest entries and Path.exists()
-checks, so it's testable without hitting the IPUMS API. Used by
-extractors.ipums_api.IPUMSExtractor.extract_incremental to avoid re-submitting
-extracts that would just duplicate samples/variables already pulled (every
-submit_extract call counts against the user's IPUMS account quota).
+Pure and network-free - operates only on manifest entries, their DDI codebooks
+and Path.exists() checks, so it's testable without hitting the IPUMS API. Used
+by extractors.ipums_api.IPUMSExtractor.extract_incremental to avoid
+re-submitting extracts that would just duplicate samples/variables already
+pulled (every submit_extract call counts against the user's IPUMS account
+quota).
+
+Coverage distinguishes what was *requested* from what was *delivered*: IPUMS
+returns a flag column for each requested variable that has one, plus technical
+and weight columns nobody asked for. Diffing runs on the requested set, because
+that is what a caller can ask for again; the delivered set is what
+_COVERAGE.yaml reports, because that is what is really in the files.
+
+Coverage is deliberately not aware of data_quality_flags or data_structure.
+Both are request modifiers rather than coverage dimensions: reusing a
+flags-off extract for a flags-on request is already blocked by
+extractors.ipums_api.find_matching_extract, and hierarchical-vs-rectangular
+changes the row grain, which belongs in a separate collection rather than a
+boolean on a sample.
 """
 
 import re
@@ -16,9 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import structlog
 import yaml
 
+from src.extractors.ipums_ddi import try_summarize_ddi
 from src.extractors.manifest import read_manifest
+
+log = structlog.get_logger(__name__)
 
 _SAMPLE_YEAR_RE = re.compile(r"(\d{4})")
 
@@ -38,7 +56,20 @@ def parse_sample_year(sample: str) -> int | None:
 
 @dataclass(frozen=True)
 class SampleCoverage:
-    variables: frozenset[str]
+    """Sample coverage definition.
+
+    Attributes:
+        requested_variables:
+            Variables explicitly asked for in some extract covering the sample.
+        delivered_variables:
+            Columns actually present in those extracts' data files (e.g, iculding
+            flags).
+        extraction_ids:
+            Actual extraction IDs that actually contain delivered variables.
+    """
+
+    requested_variables: frozenset[str]
+    delivered_variables: frozenset[str]
     extraction_ids: tuple[str, ...]
 
 
@@ -48,11 +79,19 @@ class CollectionCoverage:
     samples: dict[str, SampleCoverage]
 
     @property
-    def variables(self) -> frozenset[str]:
-        """Union of variables ever pulled for any sample in this collection."""
+    def requested_variables(self) -> frozenset[str]:
+        """Union of variables ever requested for any sample in this collection."""
         result: set[str] = set()
         for coverage in self.samples.values():
-            result |= coverage.variables
+            result |= coverage.requested_variables
+        return frozenset(result)
+
+    @property
+    def delivered_variables(self) -> frozenset[str]:
+        """Union of columns ever delivered for any sample in this collection."""
+        result: set[str] = set()
+        for coverage in self.samples.values():
+            result |= coverage.delivered_variables
         return frozenset(result)
 
     @property
@@ -62,12 +101,38 @@ class CollectionCoverage:
         return frozenset(year for year in years if year is not None)
 
 
+def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
+    """Return the columns that an entry's extract really delivered.
+
+    Prefers what the entry recorded at download time. Falls back to the
+    local codebook as to the ground truth. Falls back further to the
+    requested list, which understates the file by every flag and preselected
+    column.
+    """
+    metadata = entry["metadata"]
+    recorded = metadata.get("delivered_variables")
+    if recorded:
+        return tuple(recorded)
+
+    summary = try_summarize_ddi(ddi_path)
+    if summary is not None:
+        return summary.variables
+
+    log.warning(
+        "ipums_coverage_delivered_fallback",
+        extraction_id=entry.get("extraction_id"),
+        ddi_path=str(ddi_path),
+    )
+    return tuple(metadata["variables"])
+
+
 def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     """Read collection_dir/_MANIFEST.yaml, drop any entry whose data file or
     DDI codebook no longer exists on disk, and union the surviving entries'
-    variables into per-sample coverage.
+    requested and delivered variables into per-sample coverage.
     """
-    variables_by_sample: dict[str, set[str]] = {}
+    requested_by_sample: dict[str, set[str]] = {}
+    delivered_by_sample: dict[str, set[str]] = {}
     extraction_ids_by_sample: dict[str, list[str]] = {}
 
     for entry in read_manifest(collection_dir):
@@ -76,8 +141,10 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
         ddi_path = Path(metadata["ddi_path"])
         if not data_path.exists() or not ddi_path.exists():
             continue
+        delivered = _delivered_variables(entry, ddi_path)
         for sample in metadata["samples"]:
-            variables_by_sample.setdefault(sample, set()).update(metadata["variables"])
+            requested_by_sample.setdefault(sample, set()).update(metadata["variables"])
+            delivered_by_sample.setdefault(sample, set()).update(delivered)
             ids = extraction_ids_by_sample.setdefault(sample, [])
             # extract() appends a manifest entry on every call, including
             # cache hits that just re-point at an already-recorded
@@ -87,10 +154,11 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
 
     samples = {
         sample: SampleCoverage(
-            variables=frozenset(variables_by_sample[sample]),
+            requested_variables=frozenset(requested_by_sample[sample]),
+            delivered_variables=frozenset(delivered_by_sample[sample]),
             extraction_ids=tuple(extraction_ids_by_sample[sample]),
         )
-        for sample in variables_by_sample
+        for sample in requested_by_sample
     }
     return CollectionCoverage(collection=collection, samples=samples)
 
@@ -99,17 +167,23 @@ def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:
     """Write collection_dir/_COVERAGE.yaml - fully rebuilt from `coverage`
     every time, never hand-edited, never itself a source of truth (that's
     still _MANIFEST.yaml). A read-optimized summary of all unique years and
-    variables ever requested for the collection, and which extraction_id(s)
+    variables ever pulled for the collection, and which extraction_id(s)
     cover each sample.
+
+    `variables` is the delivered column set - what the files really contain,
+    flag columns included. `requested_variables` is what was actually asked
+    for, and is the set plan_delta_requests diffs against.
     """
     out_path = collection_dir / _COVERAGE_FILENAME
     payload = {
         "collection": coverage.collection,
         "years": sorted(coverage.years),
-        "variables": sorted(coverage.variables),
+        "variables": sorted(coverage.delivered_variables),
+        "requested_variables": sorted(coverage.requested_variables),
         "samples": {
             sample: {
-                "variables": sorted(sample_coverage.variables),
+                "variables": sorted(sample_coverage.delivered_variables),
+                "requested_variables": sorted(sample_coverage.requested_variables),
                 "extraction_ids": list(sample_coverage.extraction_ids),
             }
             for sample, sample_coverage in sorted(coverage.samples.items())
@@ -150,6 +224,12 @@ def plan_delta_requests(
       to either extract.
     - If neither case applies, returns [] - the request is already fully
       covered, nothing new to submit.
+
+    Diffs against each sample's *requested* variables, not its delivered ones.
+    Delivered columns include flags and preselected technical columns that a
+    caller cannot ask for by name, and - for samples covered only by
+    variable-delta extracts - columns that were deliberately dropped before
+    reaching bronze, so they do not mean "you already have this".
     """
     requested_variables = set(variables)
     normalized_variables = sorted(requested_variables)
@@ -162,7 +242,7 @@ def plan_delta_requests(
         if sample_coverage is None:
             new_samples.append(sample)
             continue
-        missing = requested_variables - sample_coverage.variables
+        missing = requested_variables - sample_coverage.requested_variables
         if missing:
             stale_samples.append(sample)
             missing_variables |= missing
