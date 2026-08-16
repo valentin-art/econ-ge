@@ -230,6 +230,7 @@ class IPUMSExtractRequest(NamedTuple):
     samples: tuple[str, ...]
     variables: tuple[str, ...]
     description: str = ""
+    data_quality_flags: bool = True
 
 
 # Microdata extracts pulled by the IPUMS extract/parse pipeline.
