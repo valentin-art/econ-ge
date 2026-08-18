@@ -27,8 +27,10 @@ Functions:
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 import structlog
@@ -101,10 +103,16 @@ class DDISummary:
         variables (tuple[...]):
             Every column in the data file, in codebook order - requested
             variables, their flag columns, and technical IPUMS columns.
-        quality_flags (dict[...]):
-            Quality flags and corresponding source variables.
-        topcode_flags (dict[...]):
-            Topcode flags and corresponding source variables.
+        quality_flags (Mapping[...]):
+            Quality flags and corresponding source variables. A read-only
+            view (types.MappingProxyType): frozen=True only stops the field
+            itself from being reassigned, not its contents from being
+            mutated in place - and every cache hit in _SUMMARY_CACHE hands
+            out the same shared instance, so an in-place mutation here would
+            corrupt what every other caller sees for this codebook.
+        topcode_flags (Mapping[...]):
+            Topcode flags and corresponding source variables. Same
+            read-only-view reasoning as quality_flags.
 
     Methods:
         kind_of(name: str):
@@ -113,8 +121,12 @@ class DDISummary:
 
     ddi_path: Path
     variables: tuple[str, ...]
-    quality_flags: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    topcode_flags: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    quality_flags: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    topcode_flags: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def flag_names(self) -> frozenset[str]:
@@ -173,8 +185,8 @@ def _summarize_codebook(ddi_path: Path, codebook: Codebook) -> DDISummary:  # ty
     return DDISummary(
         ddi_path=ddi_path,
         variables=tuple(variables),
-        quality_flags={k: tuple(v) for k, v in quality_flags.items()},
-        topcode_flags={k: tuple(v) for k, v in topcode_flags.items()},
+        quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
+        topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
     )
 
 
