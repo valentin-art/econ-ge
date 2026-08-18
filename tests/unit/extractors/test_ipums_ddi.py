@@ -73,6 +73,19 @@ def test_parse_flag_label_topcode() -> None:
     assert parse_flag_label("Topcode Flag for INCFARM") == ("topcode", ("INCFARM",))
 
 
+def test_parse_flag_label_strips_trailing_punctuation() -> None:
+    # A label written as a full sentence ("... for INCFARM.") must not lose
+    # the flag entirely just because of trailing punctuation.
+    assert parse_flag_label("Data quality flag for INCFARM.") == (
+        "quality",
+        ("INCFARM",),
+    )
+    assert parse_flag_label("Data quality flag for TEST1, TEST2, and TEST3.") == (
+        "quality",
+        ("TEST1", "TEST2", "TEST3"),
+    )
+
+
 @pytest.mark.parametrize(
     "label",
     [
@@ -118,9 +131,14 @@ def test_summarize_ddi_maps_sources_to_quality_and_topcode_flags(
     assert summary.quality_flags == {
         "ACTNLFLY": ("QACTNLFL",),
         "INCLONGJ": ("QINCLONG", "QINCLONGD"),
-        "WKSWORK1": ("QWKSWORK",),
-        "WKSWORK2": ("QWKSWORK",),
+        "WKSWORK1": ("QWKSWORK", "QWKSWORKTEST"),
+        "WKSWORK2": ("QWKSWORK", "QWKSWORKTEST"),
+        "WKSWORKTEST": ("QWKSWORKTEST",),
         "UHRSWORKLY": ("QUHRSWORKLY",),
+        "TEST1": ("QTEST1", "QTEST2", "QTEST3", "QTEST4"),
+        "TEST2": ("QTEST1", "QTEST2", "QTEST3", "QTEST4"),
+        "TEST3": ("QTEST1", "QTEST2", "QTEST3", "QTEST4"),
+        "TEST4": ("QTEST3", "QTEST4"),
     }
     assert summary.topcode_flags == {"INCLONGJ": ("TINCLONGJ",)}
 

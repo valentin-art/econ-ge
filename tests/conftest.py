@@ -9,6 +9,7 @@ behaviour it claims to.
 
 import gzip
 from collections.abc import Callable, Sequence
+from xml.sax.saxutils import escape
 
 import pytest
 
@@ -124,7 +125,7 @@ def make_ddi_xml() -> Callable[..., str]:
             rendered.append(
                 _VAR_TEMPLATE.format(
                     name=name,
-                    label=label,
+                    label=escape(label),
                     start=position,
                     end=position + width - 1,
                     width=width,

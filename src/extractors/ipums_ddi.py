@@ -15,7 +15,7 @@ Classes:
 
 Functions:
     parse_flag_label(..):
-        Takes a variable label string a returns its flag kind.
+        Takes a variable label string and returns its flag kind.
     _summarize_codebook(..):
         Returns information about variables and quality/topcode flags.
     summarize_ddi(..):
@@ -23,7 +23,7 @@ Functions:
         wraps _summarize_codebook().
     try_summarize_ddi(..):
         A version of summarize_ddi() that  prints warning instead of
-        rising error in case of corrupted raw XML-codebook.
+        raising error in case of corrupted raw XML-codebook.
 """
 
 import re
@@ -51,6 +51,10 @@ _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
 # Regex expression that aims to recognize a flag kind
 _QUALIFIER_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 
+# Regex expression that strips trailing sentence punctuation left over once
+# qualifiers are removed (e.g. "INCFARM." -> "INCFARM")
+_TRAILING_PUNCT_RE = re.compile(r"[.,;:]+\s*$")
+
 # Regex expression that aims to find candidates of a source variable
 # for the flag (QINCWAGE -> INCWAGE)
 _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
@@ -77,6 +81,8 @@ def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
         ('quality', ('SRCEARN',))
         >>> parse_flag_label("Topcode Flag for INCFARM")
         ('topcode', ('INCFARM',))
+        >>> parse_flag_label("Topcode Flag for INCFARM.")
+        ('topcode', ('INCFARM',))
         >>> parse_flag_label("Flag for ASEC") is None
         True
     """
@@ -85,6 +91,7 @@ def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
         if match is None:
             continue
         tail = _QUALIFIER_RE.sub("", match.group("sources")).strip()
+        tail = _TRAILING_PUNCT_RE.sub("", tail).strip()
         candidates = (token.strip() for token in _SOURCE_SPLIT_RE.split(tail))
         sources = tuple(
             candidate for candidate in candidates if _VALID_NAME_RE.match(candidate)
@@ -115,6 +122,8 @@ class DDISummary:
             Topcode flags and corresponding source variables. Same
             read-only-view reasoning as quality_flags.
 
+    Not hashable - see __hash__ below.
+
     Methods:
         kind_of(name: str):
             Returns a kind of a flag for a given flag name, or nothing.
@@ -129,6 +138,11 @@ class DDISummary:
         default_factory=lambda: MappingProxyType({})
     )
 
+    # quality_flags/topcode_flags hold unhashable MappingProxyType views, so
+    # the frozen=True default __hash__ would only fail by accident. Disabled
+    # explicitly rather than hashing a partial subset of fields nothing needs.
+    __hash__ = None  # type: ignore[assignment]
+
     @property
     def flag_names(self) -> frozenset[str]:
         """Every flag column, of either kind."""
@@ -141,20 +155,18 @@ class DDISummary:
 
     def kind_of(self, name: str) -> FlagKind | None:
         """Which kind of flag `name` is, or None if it is not a flag."""
-        for kind, mapping in (
-            ("quality", self.quality_flags),
-            ("topcode", self.topcode_flags),
-        ):
-            if any(name in names for names in mapping.values()):
-                return kind  # type: ignore[return-value]
+        if any(name in names for names in self.quality_flags.values()):
+            return "quality"
+        if any(name in names for names in self.topcode_flags.values()):
+            return "topcode"
         return None
 
 
-def _summarize_codebook(ddi_path: Path, codebook: Codebook) -> DDISummary:  # type: ignore[no-untyped-def]
+def _summarize_codebook(ddi_path: Path, codebook: Codebook) -> DDISummary:
     """Helper that takes a ddi's path and a codebook and generates a summary.
 
-    The function uses a native Codebook instance from ipumspy (parced by
-    ipums native reader) rather than a localcodebook file itself. That
+    The function uses a native Codebook instance from ipumspy (parsed by
+    ipums native reader) rather than a local codebook file itself. That
     instance already contains a label string that is used to identify flag
     kind.
 
@@ -262,7 +274,12 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
     try:
         summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
     except Exception as exc:
-        log.warning("ipums_ddi_unreadable", ddi_path=str(ddi_path), error=str(exc))
+        log.warning(
+            "ipums_ddi_unreadable",
+            ddi_path=str(ddi_path),
+            error=str(exc),
+            exc_info=True,
+        )
         _SUMMARY_CACHE[key] = None
         return None
     _SUMMARY_CACHE[key] = summary

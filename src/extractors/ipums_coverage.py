@@ -111,7 +111,7 @@ def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
     """
     metadata = entry["metadata"]
     recorded = metadata.get("delivered_variables")
-    if recorded:
+    if recorded is not None:
         return tuple(recorded)
 
     summary = try_summarize_ddi(ddi_path)
