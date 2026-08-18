@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
+from ipumspy.api.exceptions import BadIpumsApiRequest
 
 from src.config.settings import settings
 from src.extractors.base import (
@@ -22,6 +23,7 @@ from src.extractors.ipums_coverage import (
     plan_delta_requests,
     save_coverage,
 )
+from src.extractors.ipums_ddi import collection_flag_registry, try_summarize_ddi
 from src.extractors.manifest import append_to_manifest, read_manifest
 
 log = structlog.get_logger(__name__)
@@ -29,6 +31,57 @@ log = structlog.get_logger(__name__)
 
 def _default_data_structure() -> dict[str, dict[str, str]]:
     return {"rectangular": {"on": "P"}}
+
+
+def _validate_requested_variables(
+    collection_dir: Path, variables: Sequence[str]
+) -> None:
+    """Raise ValueError if any requested variable is a flag column.
+
+    Since IPUMS flag columns cannot be requested by name - they are attached to
+    a requested variable, the function aims to avoid sending API requests which
+    would be rejected with HTTP 400: ("Invalid mnemonic: ..."). The function
+    rejects a name if any codebook on the disk labels it a flag
+    (extractors.ipums_ddi.collection_flag_registry).
+
+    Args:
+        collection_dir (Path):
+            Path to collection's dir containing _MANIFEST.yaml.
+        variables (Sequence[str]):
+            IPUMS variable names, e.g. ["AGE", "SEX"].
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError, if any variable is identified as a flag.
+    """
+    registry = collection_flag_registry(collection_dir)
+    if not registry:
+        return
+
+    problems = []
+    for variable in variables:
+        kind = registry.kind_of(variable)
+        if kind is None:
+            continue
+        sources = ", ".join(registry.sources_of(variable))
+        if kind == "quality":
+            problems.append(
+                f"{variable} is the IPUMS data quality flag for {sources}, not a "
+                f"requestable variable. Drop it from `variables` and pass "
+                f"data_quality_flags=True - the flag column is added "
+                f"automatically for every requested variable that has one."
+            )
+        else:
+            problems.append(
+                f"{variable} is the IPUMS topcode flag for {sources}, not a "
+                f"requestable variable. Drop it from `variables`; it is "
+                f"delivered automatically alongside {sources} regardless of "
+                f"data_quality_flags."
+            )
+    if problems:
+        raise ValueError("\n".join(problems))
 
 
 def find_matching_extract(
@@ -41,21 +94,30 @@ def find_matching_extract(
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
 
+    Searches the most recent manifest entry in `collection_dir` such that:
+    - Samples exactly match `samples`
+    - Variables are a superset of `variables`
+    - Data file and DDI codebook both still exist on disk
+    - The data_structure and data_quality_flags must also match
+
     Args:
-        collection_dir (Path): Path to the collection's dir containing _MANIFEST.yaml
-        samples (Sequence[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
-        variables (Sequence[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
-        data_structure (dict[str, dict[str, str]]): A form of data pulled:
-            Hierarchical or rectangular data
-        data_quality_flags (bool): Whether to pull IPUMS Data quality flags
+        collection_dir (Path):
+            Path to the collection's dir containing _MANIFEST.yaml.
+        samples (Sequence[str]):
+            IPUMS sample IDs, e.g. ["cps2006_09s"].
+        variables (Sequence[str]):
+            IPUMS variable names, e.g. ["AGE", "SEX"].
+        data_structure (dict[str, dict[str, str]]):
+            A form of data pulled: Hierarchical or rectangular data.
+        data_quality_flags (bool):
+            Whether to pull IPUMS Data quality flags.
 
     Returns:
-        tuple[Path, Path, int] | None: (data_path, ddi_path, extract_id) for
-        the most recent manifest entry in `collection_dir` such that:
-            - samples exactly match `samples`
-            - variables are a superset of `variables`
-            - Data file and DDI codebook both still exist on disk
-            - The data_structure and data_quality_flags must also match
+        tuple[Path, Path, int] or None
+        Contains following information
+            data_path (Path): Path containing data for matched collection.
+            ddi_path (Path): Path containing dictionaries for matched collection.
+            extract_id: A number of raw data extract for matched collection.
         None if no such entry exists.
     """
     requested_samples = set(samples)
@@ -67,9 +129,9 @@ def find_matching_extract(
             continue
         if not requested_variables <= set(metadata["variables"]):
             continue
-        if metadata.get("data_structure") != data_structure:
+        if metadata.get("data_structure", _default_data_structure()) != data_structure:
             continue
-        if metadata.get("data_quality_flags") != data_quality_flags:
+        if metadata.get("data_quality_flags", True) != data_quality_flags:
             continue
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
@@ -117,26 +179,49 @@ class IPUMSExtractor(Extractor):
         """Pull a microdata extract for `collection` and save the raw .dat.gz +
         DDI .xml codebook as-is.
 
-        Parameters
-        ----------
-        collection : IPUMS collection name, e.g. "cps" or "usa"
-        samples    : IPUMS sample IDs, e.g. ["cps2006_09s"]
-        variables  : IPUMS variable names, e.g. ["AGE", "SEX"]
-        data_quality_flags: Whether to pull IPUMS Data quality flags
-        data_structure: A form of data to pull: Hierarchical or rectangular data
-        request_kind: recorded in the manifest entry's metadata so the parse
-                     stage knows whether to parse this extract as a normal
-                     new-samples pull or merge it into existing bronze data
-                     for samples that were already partially covered
-        force      : submit and download a new extract even if a manifest
-                     entry already covers this exact (samples, variables)
-                     request, instead of reusing it
+        Args:
+            collection (str):
+                IPUMS collection name, e.g. "cps" or "usa"
+            samples (Sequence[str]):
+                IPUMS sample IDs, e.g. ["cps2006_09s"]
+            variables(Sequence[str]):
+                IPUMS variable names, e.g. ["AGE", "SEX"]
+            data_quality_flags (bool):
+                Whether to pull IPUMS Data quality flags
+            data_structure (dict[...]):
+                A form of data to pull: Hierarchical or rectangular data
+            request_kind(RequestKind):
+                Takes one of two values:
+                "new_samples", if only new data samples are requested.
+                "variable_delta", if new variables for existing samples are
+                requested.
+            force (bool):
+                Submit and download a new extract even if a manifest entry
+                already covers this exact (samples, variables) request, instead
+                of reusing it
+
+        Returns:
+            ExtractionRecord. Contains entry records both what was requested and
+            what the codebook says was delivered (`delivered_variables`, plus the
+            `quality_flags`/`topcode_flags` maps).
+
+        Raises:
+            ValueError
+                A requested variable is a flag column already known from a
+                codebook on disk; nothing is submitted.
+            BadIpumsApiRequest
+                The API rejected the request. Re-raised with the verbatim server
+                message plus guidance about flag columns.
+            FileNotFoundError
+                The download completed but the expected
+                {collection}_{extract_id:05d}.dat.gz/.xml pair is not on disk.
         """
         log.info(
             "ipums_extract_start", collection=collection, samples=samples, force=force
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
+        _validate_requested_variables(collection_dir, variables)
 
         effective_data_structure = (
             data_structure if data_structure is not None else _default_data_structure()
@@ -167,10 +252,21 @@ class IPUMSExtractor(Extractor):
                 samples=list(samples),
                 variables=list(variables),
                 description=description,
-                data_quality_flags=data_quality_flags,
                 data_structure=effective_data_structure,
             )
-            self.client.submit_extract(microdata_extract)
+            if data_quality_flags:
+                microdata_extract.add_data_quality_flags(list(variables))
+            try:
+                self.client.submit_extract(microdata_extract)
+            except BadIpumsApiRequest as exc:
+                raise BadIpumsApiRequest(
+                    f"{exc}\n\n"
+                    f"Requested variables: {sorted(variables)}\n"
+                    f"If any of these are IPUMS flag columns, they cannot be "
+                    f"requested by name: drop them from `variables` and pass "
+                    f"data_quality_flags=True, and the flag column is added "
+                    f"automatically for every requested variable that has one."
+                ) from exc
             self.client.wait_for_extract(microdata_extract)
             self.client.download_extract(microdata_extract, download_dir=collection_dir)
             extract_id = microdata_extract.extract_id
@@ -197,6 +293,23 @@ class IPUMSExtractor(Extractor):
             "request_kind": request_kind,
             "force": force,
         }
+        # Variable types should be recorded to metadata
+        summary = try_summarize_ddi(ddi_path)
+        if summary is not None:
+            metadata["delivered_variables"] = tuple(summary.variables)
+            metadata["quality_flags"] = {
+                source: list(names) for source, names in summary.quality_flags.items()
+            }
+            metadata["topcode_flags"] = {
+                source: list(names) for source, names in summary.topcode_flags.items()
+            }
+        else:
+            log.warning(
+                "ipums_delivered_variables_unrecorded",
+                collection=collection,
+                extract_id=extract_id,
+                ddi_path=str(ddi_path),
+            )
         extraction_id = f"{collection}_{extract_id:05d}"
         record = build_extraction_record(
             source="ipums_api",
@@ -247,28 +360,35 @@ class IPUMSExtractor(Extractor):
         With force=True, two extracts may be submitted.
 
         Args:
-            collection (str): IPUMS collection name, e.g. "cps" or "usa"
-            samples (Sequence[str]): IPUMS sample IDs, e.g. ["cps2006_09s"]
-            variables (Sequence[str]): IPUMS variable names, e.g. ["AGE", "SEX"]
-            data_quality_flags (bool): Whether to pull IPUMS Data quality flags
-            data_structure (dict[str, dict[str, str]] | None): A form of data to pull: Hierarchical or rectangular data
-            description (str): Description of the extract, stored in the manifest entry's metadata
-            force (bool): If True, submit and download a new extract even if a manifest entry already covers this exact (samples, variables) request, instead of reusing it
+            collection (str):
+                IPUMS collection name, e.g. "cps" or "usa".
+            samples (Sequence[str]):
+                IPUMS sample IDs, e.g. ["cps2006_09s"].
+            variables (Sequence[str]):
+                IPUMS variable names, e.g. ["AGE", "SEX"].
+            data_quality_flags (bool):
+                Whether to pull IPUMS Data quality flags.
+            data_structure (dict[str, dict[str, str]] | None):
+                A form of data to pull: Hierarchical or rectangular data.
+            description (str):
+                Description of the extract, stored in the manifest entry's
+                metadata.
+            force (bool):
+                If True, submit and download a new extract even if
+                a manifest entry already covers this exact request
+                (samples, variables) , instead of reusing it
 
         Returns:
-            list[ExtractionRecord]: List of extraction records for the extracts that were submitted and downloaded. Empty if nothing was missing and no new extracts were needed.
+            list[ExtractionRecord]:
+                List of extraction records for the extracts that were
+                submitted and downloaded. Empty if nothing was missing
+                and no new extracts were needed.
         """
         collection_dir = self.storage_dir / collection
         if force:
             coverage = build_coverage(collection_dir, collection)
             # Force means "pull it regardless of whether plan_delta_requests
-            # would think it's needed" - but the request_kind label still
-            # has to match reality, or the parse stage routes a forced pull
-            # covering already-known samples through parse_to_bronze's
-            # full-file overwrite instead of a merge (silently dropping
-            # every other column already in that year's bronze file). Split
-            # into groups the same way plan_delta_requests's non-forced path
-            # already does, one extract() call per group actually present.
+            # would think it's needed"
             known_samples = [s for s in samples if s in coverage.samples]
             new_samples = [s for s in samples if s not in coverage.samples]
             groups: list[tuple[list[str], RequestKind]] = []
