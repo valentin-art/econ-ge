@@ -12,6 +12,9 @@ Flag for INCFARM". That label is the only signal used here.
 Classes:
     DDISummary:
         Collects a content of a codebook: variables and quality/topcode flags.
+    FlagRegistry:
+        Every flag column known for a collection, mapped back to its source
+        variable(s).
 
 Functions:
     parse_flag_label(..):
@@ -24,10 +27,19 @@ Functions:
     try_summarize_ddi(..):
         A version of summarize_ddi() that  prints warning instead of
         raising error in case of corrupted raw XML-codebook.
+    summary_from_metadata(..):
+        Rebuild a DDISummary from what a manifest entry recorded.
+    flag_columns_for(..):
+        Returns all flag columns belonging to variables.
+    merge_column_names(..):
+        Joins all variables together: source variables and quality/topcode
+        flags.
+    registry_from_summaries(..)
+    collection_flag_registry(..)
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -284,3 +296,179 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
         return None
     _SUMMARY_CACHE[key] = summary
     return summary
+
+
+def summary_from_metadata(metadata: dict) -> DDISummary | None:
+    """Rebuild a DDISummary from what a manifest entry recorded, without
+    touching the codebook. None if the entry predates those keys.
+
+    Lets a reader keep working when the .xml itself has become unreadable but
+    the manifest entry written at download time is intact.
+
+    Args:
+        metadata (dict):
+            Metadata parsed into dict.
+
+    Returns:
+        DDISummary
+    """
+    delivered = metadata.get("delivered_variables")
+    if not delivered:
+        return None
+    return DDISummary(
+        ddi_path=Path(metadata.get("ddi_path", "")),
+        variables=tuple(delivered),
+        quality_flags={
+            k: tuple(v) for k, v in (metadata.get("quality_flags") or {}).items()
+        },
+        topcode_flags={
+            k: tuple(v) for k, v in (metadata.get("topcode_flags") or {}).items()
+        },
+    )
+
+
+def flag_columns_for(
+    summary: DDISummary,
+    variables: Iterable[str],
+    include_topcode: bool = True,
+) -> tuple[str, ...]:
+    """Determine flag columns belonging to any of `variables`.
+
+    A flag shared by several source variables (QWKSWORK covers WKSWORK1 and
+    WKSWORK2) is included when any one of them is requested.
+    """
+    requested = set(variables)
+    mappings = [summary.quality_flags]
+    if include_topcode:
+        mappings.append(summary.topcode_flags)
+    wanted = {
+        name
+        for mapping in mappings
+        for source, names in mapping.items()
+        if source in requested
+        for name in names
+    }
+    return tuple(name for name in summary.variables if name in wanted)
+
+
+def merge_column_names(
+    summary: DDISummary | None,
+    requested: Sequence[str],
+    include_topcode_flags: bool = True,
+) -> list[str]:
+    """Joins all variables together: source variables and quality/topcode flags.
+
+    With summary=None, falls back to `requested` - exactly the behaviour before
+    flag columns were tracked.
+    """
+    if summary is None:
+        return list(requested)
+    flags = flag_columns_for(summary, requested, include_topcode=include_topcode_flags)
+    return [*requested, *(name for name in flags if name not in set(requested))]
+
+
+@dataclass(frozen=True)
+class FlagRegistry:
+    """Flag column names known for a collection, mapped back to the variables
+    that they flag.
+
+    Built from codebooks already on disk, so a flag becomes known
+    once any extract has delivered it.
+
+    Attributes:
+        quality (dict):
+            Maps each quality flag to corresponding source variables.
+        topcode (dict):
+            Maps each topcode flag to corresponding source variables.
+
+    Methods:
+        kind_of(name):
+            With given flag name, returns its kind.
+        source_of(name):
+            With given flag name, returns a list of corresonding source
+            variables.
+        __bool__():
+            True if any quality/topcode flags exist.
+    """
+
+    quality: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    topcode: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def kind_of(self, name: str) -> FlagKind | None:
+        if name in self.quality:
+            return "quality"
+        if name in self.topcode:
+            return "topcode"
+        return None
+
+    def sources_of(self, name: str) -> tuple[str, ...]:
+        return self.quality.get(name) or self.topcode.get(name) or ()
+
+    def __bool__(self) -> bool:
+        return bool(self.quality or self.topcode)
+
+
+def registry_from_summaries(summaries: Iterable[DDISummary | None]) -> FlagRegistry:
+    """Takes several DDI summaries and unions flags into one registry."""
+    quality: dict[str, list[str]] = {}
+    topcode: dict[str, list[str]] = {}
+    for summary in summaries:
+        if summary is None:
+            continue
+        for mapping, out in (
+            (summary.quality_flags, quality),
+            (summary.topcode_flags, topcode),
+        ):
+            for source, names in mapping.items():
+                for name in names:
+                    sources = out.setdefault(name, [])
+                    if source not in sources:
+                        sources.append(source)
+    return FlagRegistry(
+        quality={k: tuple(v) for k, v in quality.items()},
+        topcode={k: tuple(v) for k, v in topcode.items()},
+    )
+
+
+def collection_flag_registry(
+    collection_dir: Path,
+    manifest_entries: Collection[dict] | None = None,
+) -> FlagRegistry:
+    """Tries to collect all flags known for `collection_dir`.
+
+    Resolution order, cheapest first:
+      1. flag maps recorded in the manifest at download time - no file I/O;
+      2. the codebook itself, for entries written before those keys existed;
+      3. every *.xml in the directory, if there is no manifest at all.
+
+    `manifest_entries` lets a caller that has already read _MANIFEST.yaml pass
+    it in rather than re-reading it.
+    """
+    from src.extractors.manifest import read_manifest
+
+    entries = (
+        list(manifest_entries)
+        if manifest_entries is not None
+        else read_manifest(collection_dir)
+    )
+
+    summaries: list[DDISummary | None] = []
+    for entry in entries:
+        # try to read from manifest
+        metadata = entry.get("metadata", {})
+        recorded = summary_from_metadata(metadata)
+        if recorded is not None:
+            summaries.append(recorded)
+            continue
+        # try to read from raw XML-codebooks
+        ddi_path = metadata.get("ddi_path")
+        if ddi_path and Path(ddi_path).exists():
+            summaries.append(try_summarize_ddi(Path(ddi_path)))
+
+    # If no success, try to look into all XML files in the directory
+    if not summaries and collection_dir.exists():
+        summaries = [
+            try_summarize_ddi(path) for path in sorted(collection_dir.glob("*.xml"))
+        ]
+
+    return registry_from_summaries(summaries)

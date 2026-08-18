@@ -12,7 +12,17 @@ from pathlib import Path
 import pytest
 from ipumspy import readers
 
-from src.extractors.ipums_ddi import parse_flag_label, summarize_ddi, try_summarize_ddi
+from src.extractors.base import build_extraction_record
+from src.extractors.ipums_ddi import (
+    collection_flag_registry,
+    flag_columns_for,
+    merge_column_names,
+    parse_flag_label,
+    summarize_ddi,
+    summary_from_metadata,
+    try_summarize_ddi,
+)
+from src.extractors.manifest import append_to_manifest
 
 
 def _write_ddi(
@@ -214,3 +224,194 @@ def test_summarize_ddi_raises_for_stub_codebook(tmp_path: Path) -> None:
 
     with pytest.raises(Exception):
         summarize_ddi(stub)
+
+
+# --- deriving column lists -------------------------------------------------
+
+
+def test_flag_columns_for_includes_shared_flag_when_one_source_requested(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    assert flag_columns_for(summary, ["WKSWORK1"]) == ("QWKSWORK", "QWKSWORKTEST")
+
+
+def test_flag_columns_for_excludes_topcode_when_disabled(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    with_topcode = flag_columns_for(summary, ["INCLONGJ"], include_topcode=True)
+    without = flag_columns_for(summary, ["INCLONGJ"], include_topcode=False)
+
+    assert with_topcode == ("QINCLONG", "QINCLONGD", "TINCLONGJ")
+    assert without == ("QINCLONG", "QINCLONGD")
+
+
+def test_merge_column_names_adds_flags_and_drops_technical_columns(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("YEAR", "Survey year", 4),
+        ("ASECWT", "ASEC weight", 5),
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    columns = merge_column_names(summary, ["INCWAGE"])
+
+    assert columns == ["INCWAGE", "QINCWAGE"]
+    # The preselected technical/weight columns must stay out: bronze already
+    # has them and merge_variables_into_bronze drops them for that reason.
+    assert "YEAR" not in columns
+    assert "ASECWT" not in columns
+
+
+def test_merge_column_names_falls_back_to_requested_when_summary_is_none() -> None:
+    assert merge_column_names(None, ["AGE", "SEX"]) == ["AGE", "SEX"]
+
+
+def test_merge_column_names_does_not_duplicate_a_requested_flag(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    assert merge_column_names(summary, ["INCWAGE", "QINCWAGE"]) == [
+        "INCWAGE",
+        "QINCWAGE",
+    ]
+
+
+# --- rebuilding a summary from a manifest entry ----------------------------
+
+
+def test_summary_from_metadata_round_trips_recorded_keys() -> None:
+    summary = summary_from_metadata(
+        {
+            "ddi_path": "/tmp/cps_00001.xml",
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        }
+    )
+
+    assert summary is not None
+    assert summary.variables == ("INCWAGE", "QINCWAGE")
+    assert summary.quality_flags == {"INCWAGE": ("QINCWAGE",)}
+
+
+def test_summary_from_metadata_is_none_for_legacy_entry() -> None:
+    assert summary_from_metadata({"variables": ["AGE"]}) is None
+
+
+# --- the collection registry -----------------------------------------------
+
+
+def _seed_manifest(
+    collection_dir: Path, ddi_path: Path, extraction_id: str, metadata_extra: dict
+) -> None:
+    data_path = collection_dir / f"{extraction_id}.dat.gz"
+    data_path.write_bytes(b"data")
+    record = build_extraction_record(
+        source="ipums_api",
+        extraction_id=extraction_id,
+        file_path=data_path,
+        metadata={
+            "collection": "cps",
+            "samples": ("cps2006_09s",),
+            "variables": ("INCWAGE",),
+            "ddi_path": str(ddi_path),
+            "extract_id": 1,
+            **metadata_extra,
+        },
+    )
+    append_to_manifest(collection_dir, record)
+
+
+def test_collection_flag_registry_reads_manifest_without_parsing_ddis(
+    tmp_path: Path, make_ddi_xml, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    ddi_path = _write_ddi(
+        collection_dir,
+        make_ddi_xml,
+        [
+            ("INCWAGE", "Wage income", 7),
+            ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+        ],
+    )
+    _seed_manifest(
+        collection_dir,
+        ddi_path,
+        "cps_00001",
+        {
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        },
+    )
+
+    def must_not_parse(path):
+        raise AssertionError("registry should not parse a DDI it already has recorded")
+
+    monkeypatch.setattr(
+        "src.extractors.ipums_ddi.readers.read_ipums_ddi", must_not_parse
+    )
+
+    registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+    assert registry.sources_of("QINCWAGE") == ("INCWAGE",)
+
+
+def test_collection_flag_registry_backfills_legacy_entry_from_ddi(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    ddi_path = _write_ddi(
+        collection_dir,
+        make_ddi_xml,
+        [
+            ("INCWAGE", "Wage income", 7),
+            ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+        ],
+    )
+    # A manifest entry from before delivered_variables was recorded.
+    _seed_manifest(collection_dir, ddi_path, "cps_00001", {})
+
+    registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+
+
+def test_collection_flag_registry_falls_back_to_loose_codebooks(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    _write_ddi(
+        collection_dir,
+        make_ddi_xml,
+        [("INCFARM", "Farm income", 7), ("TINCFARM", "Topcode Flag for INCFARM", 1)],
+    )
+
+    registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("TINCFARM") == "topcode"
+
+
+def test_collection_flag_registry_is_empty_for_unknown_collection(
+    tmp_path: Path,
+) -> None:
+    registry = collection_flag_registry(tmp_path / "nothing-here")
+
+    assert not registry
+    assert registry.kind_of("QINCWAGE") is None
