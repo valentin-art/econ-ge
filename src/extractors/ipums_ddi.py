@@ -53,7 +53,8 @@ _QUALIFIER_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 
 # Regex expression that aims to find candidates of a source variable
 # for the flag (QINCWAGE -> INCWAGE)
-_SOURCE_SPLIT_RE = re.compile(r"\s+and\s+|\s*,\s*", re.I)
+_SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
+
 
 # Regex expression that aims to determine if sepected candidate is
 # a valid variable from a local codebook

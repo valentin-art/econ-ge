@@ -51,6 +51,22 @@ def test_parse_flag_label_splits_multiple_sources() -> None:
         "quality",
         ("WKSWORK1", "WKSWORK2"),
     )
+    assert parse_flag_label("Data quality flag for TEST1, TEST2 and TEST3") == (
+        "quality",
+        ("TEST1", "TEST2", "TEST3"),
+    )
+    assert parse_flag_label("Data quality flag for TEST1, TEST2, and TEST3") == (
+        "quality",
+        ("TEST1", "TEST2", "TEST3"),
+    )
+    assert parse_flag_label("Data quality flag for TEST1, TEST2, TEST3, and TEST4") == (
+        "quality",
+        ("TEST1", "TEST2", "TEST3", "TEST4"),
+    )
+    assert parse_flag_label("Data quality flag for TEST1, TEST2, TEST3 and TEST4") == (
+        "quality",
+        ("TEST1", "TEST2", "TEST3", "TEST4"),
+    )
 
 
 def test_parse_flag_label_topcode() -> None:

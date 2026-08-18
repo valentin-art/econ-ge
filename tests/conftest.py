@@ -75,12 +75,17 @@ CPS_FLAG_VARS: list[tuple[str, str, int]] = [
     ("WKSWORK1", "Weeks worked last year", 2),
     ("WKSWORK2", "Weeks worked last year, intervalled", 1),
     ("QWKSWORK", "Data quality flag for WKSWORK1 and WKSWORK2", 1),
+    ("QWKSWORKTEST", "Data quality flag for WKSWORK1, WKSWORK2, and WKSWORKTEST", 1),
     ("UHRSWORKLY", "Usual hours worked per week last year", 2),
     ("QUHRSWORKLY", "Data quality flag for UHRSWORKLY", 1),
     ("ASECFLAG", "Flag for ASEC", 1),
     ("HFLAG", "Flag for the 3/8 file 2014", 1),
     ("TRANWORK", "Means of transportation to work", 2),
     ("TRANTIME", "Travel time to work", 3),
+    ("QTEST1", "Data quality flag for TEST1, TEST2 and TEST3", 1),
+    ("QTEST2", "Data quality flag for TEST1, TEST2, and TEST3", 1),
+    ("QTEST3", "Data quality flag for TEST1, TEST2, TEST3, and TEST4", 1),
+    ("QTEST4", "Data quality flag for TEST1, TEST2, TEST3 and TEST4", 1),
 ]
 
 
