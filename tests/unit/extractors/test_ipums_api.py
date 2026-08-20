@@ -743,6 +743,18 @@ def test_find_matching_extract_misses_when_flags_explicitly_differ(
     assert client.submit_calls == 2
 
 
+def test_extract_accepts_lowercase_variable_names(tmp_path, make_ddi_xml) -> None:
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["age"]
+    )
+    assert client.submitted[0]["variables"]["AGE"]["dataQualityFlags"] is True
+    assert record.metadata["variables"] == ("AGE",)
+
+
 # --- Real-API test: commented out on purpose, see module docstring. ---
 #
 # def test_extract_hits_real_ipums_api(tmp_path: Path) -> None:

@@ -221,6 +221,9 @@ class IPUMSExtractor(Extractor):
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
+        # ipumspy upper-cases Variable.name on construction, and add_data_quality_flags
+        # resolves by exact string match - so normalize before anything looks a name up.
+        variables = tuple(v.upper() for v in variables)
         _validate_requested_variables(collection_dir, variables)
 
         effective_data_structure = (
