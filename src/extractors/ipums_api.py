@@ -262,14 +262,19 @@ class IPUMSExtractor(Extractor):
             try:
                 self.client.submit_extract(microdata_extract)
             except BadIpumsApiRequest as exc:
+                hint = ""
+                if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
+                    hint = (
+                        "\nIf any of these are IPUMS flag columns, they cannot be requested by "
+                        "name: drop them from `variables` and pass data_quality_flags=True - the "
+                        "flag column is added automatically for every requested variable that "
+                        "has one."
+                    )
                 raise BadIpumsApiRequest(
-                    f"{exc}\n\n"
-                    f"Requested variables: {sorted(variables)}\n"
-                    f"If any of these are IPUMS flag columns, they cannot be "
-                    f"requested by name: drop them from `variables` and pass "
-                    f"data_quality_flags=True, and the flag column is added "
-                    f"automatically for every requested variable that has one."
+                    f"{exc}\n\nRequested samples: {sorted(samples)}\n"
+                    f"Requested variables: {sorted(variables)}{hint}"
                 ) from exc
+
             self.client.wait_for_extract(microdata_extract)
             self.client.download_extract(microdata_extract, download_dir=collection_dir)
             extract_id = microdata_extract.extract_id
