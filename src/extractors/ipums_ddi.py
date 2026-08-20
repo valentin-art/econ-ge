@@ -366,7 +366,10 @@ class FlagRegistry:
         return None
 
     def sources_of(self, name: str) -> tuple[str, ...]:
-        return self.quality.get(name) or self.topcode.get(name) or ()
+        """Source variable(s) `name` flags, or () if `name` is not a flag."""
+        if name in self.quality:
+            return self.quality[name]
+        return self.topcode.get(name, ())
 
     def __bool__(self) -> bool:
         return bool(self.quality or self.topcode)
