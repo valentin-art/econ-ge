@@ -387,6 +387,7 @@ class IPUMSExtractor(Extractor):
                 submitted and downloaded. Empty if nothing was missing
                 and no new extracts were needed.
         """
+        variables = tuple(v.upper() for v in variables)
         collection_dir = self.storage_dir / collection
         if force:
             coverage = build_coverage(collection_dir, collection)

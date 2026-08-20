@@ -755,6 +755,24 @@ def test_extract_accepts_lowercase_variable_names(tmp_path, make_ddi_xml) -> Non
     assert record.metadata["variables"] == ("AGE",)
 
 
+def test_extract_incremental_accepts_lowercase_variable_names(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE", "SEX"])
+    client = _SequentialFakeClient(start_id=50)
+    extractor.client = client
+
+    records = extractor.extract_incremental(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE", "SEX", "race"]
+    )
+
+    assert client.submitted[0]["variables"]["RACE"]["dataQualityFlags"] is True
+    assert records[0].metadata["variables"] == ("RACE",)
+
+
 # --- Real-API test: commented out on purpose, see module docstring. ---
 #
 # def test_extract_hits_real_ipums_api(tmp_path: Path) -> None:
