@@ -129,6 +129,10 @@ def find_matching_extract(
             continue
         if not requested_variables <= set(metadata["variables"]):
             continue
+        # Entries predating these keys were all pulled with today's defaults
+        # (rectangular-on-P, flags on) - verified against the cps manifest.
+        # Treating "absent" as "different" would make every one of them a
+        # permanent cache miss and sends IPUMS request.
         if metadata.get("data_structure", _default_data_structure()) != data_structure:
             continue
         if metadata.get("data_quality_flags", True) != data_quality_flags:

@@ -43,6 +43,8 @@ from typing import Literal
 import structlog
 from ipumspy import Codebook, readers
 
+from src.extractors.manifest import read_manifest
+
 log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
@@ -338,10 +340,9 @@ class FlagRegistry:
 
     Methods:
         kind_of(name):
-            With given flag name, returns its kind.
-        source_of(name):
-            With given flag name, returns a list of corresonding source
-            variables.
+            "quality" / "topcode" for a known flag column, else None.
+        sources_of(name):
+            The source variable(s) `name` flags, or () if it is not a flag.
         __bool__():
             True if any quality/topcode flags exist.
     """
@@ -411,7 +412,6 @@ def collection_flag_registry(
     `manifest_entries` lets a caller that has already read _MANIFEST.yaml pass
     it in rather than re-reading it.
     """
-    from src.extractors.manifest import read_manifest
 
     entries = (
         list(manifest_entries)

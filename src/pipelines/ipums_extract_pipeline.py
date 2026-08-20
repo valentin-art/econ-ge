@@ -5,6 +5,8 @@ Companion to `pipelines.ipums_parse_pipeline` (external -> bronze). Mirrors
 in `config.sources`.
 """
 
+from typing import Sequence
+
 import structlog
 
 from src.config import sources
@@ -15,8 +17,8 @@ log = structlog.get_logger(__name__)
 
 
 def extract_ipums_extracts(
-    api_key: str,
-    extracts: list[sources.IPUMSExtractRequest] | None = None,
+    api_key: str | None,
+    extracts: Sequence[sources.IPUMSExtractRequest] | None = None,
     force: bool = False,
     data_quality_flags: bool | None = None,
 ) -> list[ExtractionRecord]:
@@ -32,19 +34,25 @@ def extract_ipums_extracts(
     account extract-request quota, and a request can be partially covered by
     several prior extracts.
 
-    Parameters
-    ----------
-    api_key  : IPUMS API registration key (settings.ipums_api_key)
-    extracts : requests to pull; defaults to sources.IPUMS_EXTRACTS
-    force    : re-submit and re-download every request in full, bypassing
-               coverage-checking entirely
-    data_quality_flags : override every request's own `data_quality_flags`
-               field. None (the default) leaves each request to decide, which
-               is itself True unless the request says otherwise. IPUMS attaches
-               a flag column to each requested variable that has one; the flag
-               column is never listed in a request's `variables`.
+    Args:
+        api_key (str):
+            IPUMS API registration key (settings.ipums_api_key).
+        extracts(list[IPUMSExtractRequest] | None):
+            Requests to pull; defaults to sources.IPUMS_EXTRACTS.
+        force (bool):
+            Re-submit and re-download every request in full, bypassing
+            coverage-checking entirely.
+        data_quality_flags (bool | None):
+            Override every request's own `data_quality_flags`
+            field. None (the default) leaves each request to decide, which
+            is itself True unless the request says otherwise. IPUMS attaches
+            a flag column to each requested variable that has one; the flag
+            column is never listed in a request's `variables`.
+
+    Returns:
+        list[ExtractionRecord]
     """
-    if api_key == "":
+    if api_key == "" or None:
         raise RuntimeError("IPUMS_API_KEY is empty - cannot extract IPUMS data")
     extracts = extracts if extracts is not None else sources.IPUMS_EXTRACTS
 
@@ -66,5 +74,9 @@ def extract_ipums_extracts(
             ),
         )
     ]
-    log.info("ipums_extract_pipeline_complete", n_extracts=len(records))
+    log.info(
+        "ipums_extract_pipeline_complete",
+        n_requests=len(extracts),
+        n_records=len(records),
+    )
     return records
