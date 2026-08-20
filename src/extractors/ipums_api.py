@@ -4,7 +4,7 @@ Submits a microdata extract request, waits for it to complete, and downloads
 the data file and its DDI codebook as-is.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 import structlog
@@ -23,7 +23,11 @@ from src.extractors.ipums_coverage import (
     plan_delta_requests,
     save_coverage,
 )
-from src.extractors.ipums_ddi import collection_flag_registry, try_summarize_ddi
+from src.extractors.ipums_ddi import (
+    FLAG_PARSER_VERSION,
+    collection_flag_registry,
+    try_summarize_ddi,
+)
 from src.extractors.manifest import append_to_manifest, read_manifest
 
 log = structlog.get_logger(__name__)
@@ -34,7 +38,9 @@ def _default_data_structure() -> dict[str, dict[str, str]]:
 
 
 def _validate_requested_variables(
-    collection_dir: Path, variables: Sequence[str]
+    collection_dir: Path,
+    variables: Sequence[str],
+    manifest_entries: Collection[dict] | None = None,
 ) -> None:
     """Raise ValueError if any requested variable is a flag column.
 
@@ -56,7 +62,7 @@ def _validate_requested_variables(
     Raises:
         ValueError, if any variable is identified as a flag.
     """
-    registry = collection_flag_registry(collection_dir)
+    registry = collection_flag_registry(collection_dir, manifest_entries)
     if not registry:
         return
 
@@ -113,18 +119,18 @@ def find_matching_extract(
             Whether to pull IPUMS Data quality flags.
 
     Returns:
-        tuple[Path, Path, int] or None
-        Contains following information
-            data_path (Path): Path containing data for matched collection.
-            ddi_path (Path): Path containing dictionaries for matched collection.
-            extract_id: A number of raw data extract for matched collection.
-        None if no such entry exists.
+        tuple[Path, Path, int] | None: `(data_path, ddi_path, extract_id)` for
+        the most recent matching entry - the .dat.gz, its DDI codebook, and the
+        IPUMS extract number - or None if no entry matches.
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
     match = None
     for entry in read_manifest(collection_dir):
-        metadata = entry["metadata"]
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if not isinstance(metadata, dict) or "samples" not in metadata:
+            log.warning("ipums_manifest_entry_skipped", entry=str(entry)[:200])
+            continue
         if set(metadata["samples"]) != requested_samples:
             continue
         if not requested_variables <= set(metadata["variables"]):
@@ -262,6 +268,10 @@ class IPUMSExtractor(Extractor):
                 data_structure=effective_data_structure,
             )
             if data_quality_flags:
+                # Per-variable rather than the extract-level `data_quality_flags=`
+                # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
+                # typo there would silently produce a flagless extract. Assumes IPUMS
+                # ignores the request for variables that have no flag.
                 microdata_extract.add_data_quality_flags(list(variables))
             try:
                 self.client.submit_extract(microdata_extract)
@@ -269,10 +279,10 @@ class IPUMSExtractor(Extractor):
                 hint = ""
                 if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
                     hint = (
-                        "\nIf any of these are IPUMS flag columns, they cannot be requested by "
-                        "name: drop them from `variables` and pass data_quality_flags=True - the "
-                        "flag column is added automatically for every requested variable that "
-                        "has one."
+                        "\nIf any of these are IPUMS flag columns, they cannot "
+                        "be requested by name: drop them from `variables` and "
+                        "pass data_quality_flags=True - the flag column is added "
+                        "automatically for every requested variable that has one."
                     )
                 raise BadIpumsApiRequest(
                     f"{exc}\n\nRequested samples: {sorted(samples)}\n"
@@ -305,9 +315,13 @@ class IPUMSExtractor(Extractor):
             "request_kind": request_kind,
             "force": force,
         }
-        # Variable types should be recorded to metadata
+        # Record what the codebook says was delivered: every column in the
+        # data file plus the flag maps, so a later reader need not re-parse it.
         summary = try_summarize_ddi(ddi_path)
         if summary is not None:
+            # Stamps the parser that produced the maps below, so a later fix to
+            # parse_flag_label invalidates them instead of being shadowed.
+            metadata["flag_parser_version"] = FLAG_PARSER_VERSION
             metadata["delivered_variables"] = tuple(summary.variables)
             metadata["quality_flags"] = {
                 source: list(names) for source, names in summary.quality_flags.items()

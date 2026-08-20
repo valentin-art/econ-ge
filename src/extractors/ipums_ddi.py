@@ -28,9 +28,14 @@ Functions:
         A version of summarize_ddi() that  prints warning instead of
         raising error in case of corrupted raw XML-codebook.
     summary_from_metadata(..):
-        Rebuild a DDISummary from what a manifest entry recorded.
-    registry_from_summaries(..)
-    collection_flag_registry(..)
+        Rebuild a DDISummary from what a manifest entry recorded, if the entry
+        was written by the current FLAG_PARSER_VERSION.
+    registry_from_summaries(..):
+        Unions several DDI summaries into one FlagRegistry, inverting each
+        summary's source-variable -> flag-names maps.
+    collection_flag_registry(..):
+        Every flag known for a collection, resolved from the manifest's
+        recorded maps, then each entry's codebook, then any loose *.xml.
 """
 
 import re
@@ -48,6 +53,16 @@ from src.extractors.manifest import read_manifest
 log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
+
+# Bump whenever parse_flag_label, its regexes, or _summarize_codebook change.
+# extract() stamps this into every manifest entry it writes; a recorded flag map
+# carrying a different (or missing) stamp is ignored and re-derived from the
+# codebook, so a parser fix reaches entries written before it.
+#
+# NOTE: entries written before this constant existed carry no stamp and there is
+# no update-in-place in extractors.manifest, so they re-parse their codebook on
+# every call - by design, and cheap next to one API round trip.
+FLAG_PARSER_VERSION = 1
 
 # Regex expressions aimed to recognize flags in local codebooks
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
@@ -114,7 +129,7 @@ def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
 class DDISummary:
     """What one extract's codebook says the extract's data file contains.
 
-    Atrributes:
+    Attributes:
         ddi_path (Path):
             Path that contains dictionaries.
         variables (tuple[...]):
@@ -134,6 +149,8 @@ class DDISummary:
     Not hashable - see __hash__ below.
 
     Methods:
+        flag_names:
+            Property. Every flag column named here, of either kind.
         kind_of(name: str):
             Returns a kind of a flag for a given flag name, or nothing.
     """
@@ -297,7 +314,8 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
 
 def summary_from_metadata(metadata: dict) -> DDISummary | None:
     """Rebuild a DDISummary from what a manifest entry recorded, without
-    touching the codebook. None if the entry predates those keys.
+    touching the codebook. None if the entry predates those keys, or if the
+    flag maps were written by a different parser version.
 
     Lets a reader keep working when the .xml itself has become unreadable but
     the manifest entry written at download time is intact.
@@ -307,20 +325,29 @@ def summary_from_metadata(metadata: dict) -> DDISummary | None:
             Metadata parsed into dict.
 
     Returns:
-        DDISummary
+        DDISummary, or None if the entry carries nothing usable.
     """
     delivered = metadata.get("delivered_variables")
     if not delivered:
         return None
+
+    # A map produced by an older parse_flag_label is not trusted: the codebook
+    # next to it on disk is the ground truth, so let the caller re-derive.
+    if metadata.get("flag_parser_version") != FLAG_PARSER_VERSION:
+        return None
+
+    quality = metadata.get("quality_flags")
+    topcode = metadata.get("topcode_flags")
+    quality_flags = quality if isinstance(quality, dict) else {}
+    topcode_flags = topcode if isinstance(topcode, dict) else {}
+
     return DDISummary(
-        ddi_path=Path(metadata.get("ddi_path", "")),
+        ddi_path=Path(str(metadata["ddi_path"]))
+        if metadata.get("ddi_path")
+        else Path(),
         variables=tuple(delivered),
-        quality_flags=MappingProxyType(
-            {k: tuple(v) for k, v in (metadata.get("quality_flags") or {}).items()}
-        ),
-        topcode_flags=MappingProxyType(
-            {k: tuple(v) for k, v in (metadata.get("topcode_flags") or {}).items()}
-        ),
+        quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
+        topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
     )
 
 
@@ -333,10 +360,14 @@ class FlagRegistry:
     once any extract has delivered it.
 
     Attributes:
-        quality (dict):
-            Maps each quality flag to corresponding source variables.
-        topcode (dict):
-            Maps each topcode flag to corresponding source variables.
+        quality (Mapping[str, tuple[str, ...]]):
+            Read-only view mapping each quality flag column to the source
+            variable(s) it flags. NOTE: this is the inverse of
+            DDISummary.quality_flags, which maps source variable -> flag names.
+        topcode (Mapping[str, tuple[str, ...]]):
+            Same, for topcode flag columns.
+
+    Not hashable - see __hash__ below.
 
     Methods:
         kind_of(name):
@@ -354,12 +385,13 @@ class FlagRegistry:
         default_factory=lambda: MappingProxyType({})
     )
 
-    # quality_flags/topcode_flags hold unhashable MappingProxyType views, so
-    # the frozen=True default __hash__ would only fail by accident. Disabled
+    # quality/topcode hold unhashable MappingProxyType views, so the
+    # frozen=True default __hash__ would only fail by accident. Disabled
     # explicitly rather than hashing a partial subset of fields nothing needs.
     __hash__ = None  # type: ignore[assignment]
 
     def kind_of(self, name: str) -> FlagKind | None:
+        """Which kind of flag `name` is, or None if it is not a flag."""
         if name in self.quality:
             return "quality"
         if name in self.topcode:
@@ -421,8 +453,18 @@ def collection_flag_registry(
 
     summaries: list[DDISummary | None] = []
     for entry in entries:
-        # try to read from manifest
-        metadata = entry.get("metadata") or {}
+        # A hand-edited/truncated manifest can carry `metadata:` empty or as a
+        # scalar. This runs on every extract(), so one bad entry must not block
+        # the whole collection.
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if not isinstance(metadata, dict):
+            if metadata is not None:
+                log.warning(
+                    "ipums_manifest_entry_malformed",
+                    collection_dir=str(collection_dir),
+                    entry=str(entry)[:200],
+                )
+            continue
         recorded = summary_from_metadata(metadata)
         if recorded is not None:
             summaries.append(recorded)
@@ -432,8 +474,12 @@ def collection_flag_registry(
         if ddi_path and Path(ddi_path).exists():
             summaries.append(try_summarize_ddi(Path(ddi_path)))
 
-    # If no success, try to look into all XML files in the directory
-    if not summaries and collection_dir.exists():
+    # If nothing usable came out of the manifest (no entries, or every recorded
+    # codebook is unreadable), sweep the directory itself.
+    if (
+        not any(summary is not None for summary in summaries)
+        and collection_dir.exists()
+    ):
         summaries = [
             try_summarize_ddi(path) for path in sorted(collection_dir.glob("*.xml"))
         ]
