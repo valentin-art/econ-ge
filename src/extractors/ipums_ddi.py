@@ -419,7 +419,7 @@ def collection_flag_registry(
     summaries: list[DDISummary | None] = []
     for entry in entries:
         # try to read from manifest
-        metadata = entry.get("metadata", {})
+        metadata = entry.get("metadata") or {}
         recorded = summary_from_metadata(metadata)
         if recorded is not None:
             summaries.append(recorded)
