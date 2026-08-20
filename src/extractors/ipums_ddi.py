@@ -313,12 +313,12 @@ def summary_from_metadata(metadata: dict) -> DDISummary | None:
     return DDISummary(
         ddi_path=Path(metadata.get("ddi_path", "")),
         variables=tuple(delivered),
-        quality_flags={
-            k: tuple(v) for k, v in (metadata.get("quality_flags") or {}).items()
-        },
-        topcode_flags={
-            k: tuple(v) for k, v in (metadata.get("topcode_flags") or {}).items()
-        },
+        quality_flags=MappingProxyType(
+            {k: tuple(v) for k, v in (metadata.get("quality_flags") or {}).items()}
+        ),
+        topcode_flags=MappingProxyType(
+            {k: tuple(v) for k, v in (metadata.get("topcode_flags") or {}).items()}
+        ),
     )
 
 
@@ -346,8 +346,17 @@ class FlagRegistry:
             True if any quality/topcode flags exist.
     """
 
-    quality: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    topcode: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    quality: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    topcode: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    # quality_flags/topcode_flags hold unhashable MappingProxyType views, so
+    # the frozen=True default __hash__ would only fail by accident. Disabled
+    # explicitly rather than hashing a partial subset of fields nothing needs.
+    __hash__ = None  # type: ignore[assignment]
 
     def kind_of(self, name: str) -> FlagKind | None:
         if name in self.quality:
@@ -380,8 +389,8 @@ def registry_from_summaries(summaries: Iterable[DDISummary | None]) -> FlagRegis
                     if source not in sources:
                         sources.append(source)
     return FlagRegistry(
-        quality={k: tuple(v) for k, v in quality.items()},
-        topcode={k: tuple(v) for k, v in topcode.items()},
+        quality=MappingProxyType({k: tuple(v) for k, v in quality.items()}),
+        topcode=MappingProxyType({k: tuple(v) for k, v in topcode.items()}),
     )
 
 
