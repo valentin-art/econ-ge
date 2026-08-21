@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+import structlog.testing
 import yaml
 
 from src.extractors.base import build_extraction_record
@@ -309,10 +311,88 @@ def test_plan_delta_requests_diffs_requested_not_delivered() -> None:
     assert planned[0].variables == ("AGE",)
 
 
-def test_build_coverage_skips_a_malformed_entry(tmp_path: Path) -> None:
+def _append_raw_entry(collection_dir: Path, entry: dict) -> None:
+    """Append a hand-built entry, bypassing build_extraction_record.
+
+    A truncated or hand-edited _MANIFEST.yaml is the case build_coverage has to
+    survive, and the record builder cannot produce those shapes.
+    """
+    manifest = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest.read_text()) if manifest.exists() else []
+    manifest.write_text(yaml.safe_dump((entries or []) + [entry], sort_keys=False))
+
+
+@pytest.mark.parametrize(
+    ("bad_entry", "reason"),
+    [
+        pytest.param(
+            {"extraction_id": "cps_00002", "metadata": "not-a-mapping"},
+            "missing_required_metadata_keys",
+            id="scalar_metadata",
+        ),
+        pytest.param(
+            {"extraction_id": "cps_00002", "metadata": None},
+            "missing_required_metadata_keys",
+            id="empty_metadata",
+        ),
+        pytest.param(
+            "just-a-string",
+            "missing_required_metadata_keys",
+            id="non_dict_entry",
+        ),
+        pytest.param(
+            {"extraction_id": "cps_00002", "metadata": {"samples": ["cps2007_09s"]}},
+            "missing_required_metadata_keys",
+            id="partial_metadata",
+        ),
+        pytest.param(
+            # Path("") is Path("."), which exists - so without an explicit guard
+            # this shape reaches entry["extraction_id"] and raises KeyError.
+            {
+                "extraction_id": "cps_00002",
+                "metadata": {
+                    "samples": ["cps2007_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/cps_00002.xml",
+                },
+            },
+            "missing_required_entry_keys",
+            id="no_file_path",
+        ),
+        pytest.param(
+            {
+                "file_path": "/nonexistent/cps_00002.dat.gz",
+                "metadata": {
+                    "samples": ["cps2007_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/cps_00002.xml",
+                },
+            },
+            "missing_required_entry_keys",
+            id="no_extraction_id",
+        ),
+    ],
+)
+def test_build_coverage_skips_a_malformed_entry(
+    tmp_path: Path, bad_entry, reason: str
+) -> None:
+    """A malformed entry is skipped with a warning, and - the point - the sound
+    entries around it still produce coverage. Asserting only `samples == {}`
+    would pass just as well if the whole manifest had been dropped.
+    """
     collection_dir = tmp_path / "cps"
     collection_dir.mkdir()
-    (collection_dir / "_MANIFEST.yaml").write_text(
-        "- extraction_id: cps_00001\n  metadata: not-a-mapping\n"
+    _add_manifest_entry(collection_dir, "cps_00001", ["cps2006_09s"], ["AGE", "SEX"])
+    _append_raw_entry(collection_dir, bad_entry)
+
+    with structlog.testing.capture_logs() as logs:
+        coverage = build_coverage(collection_dir, "cps")
+
+    assert set(coverage.samples) == {"cps2006_09s"}
+    assert coverage.samples["cps2006_09s"].requested_variables == frozenset(
+        {"AGE", "SEX"}
     )
-    assert build_coverage(collection_dir, "cps").samples == {}
+    skipped = [
+        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
+    ]
+    assert [entry["reason"] for entry in skipped] == [reason]

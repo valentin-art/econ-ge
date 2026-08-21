@@ -32,6 +32,10 @@ from src.extractors.manifest import append_to_manifest, read_manifest
 
 log = structlog.get_logger(__name__)
 
+# Metadata keys find_matching_extract reads without a fallback. A frozenset at
+# module scope rather than a tuple rebuilt on every manifest entry.
+_REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"})
+
 
 def _default_data_structure() -> dict[str, dict[str, str]]:
     return {"rectangular": {"on": "P"}}
@@ -41,6 +45,7 @@ def _validate_requested_variables(
     collection_dir: Path,
     variables: Sequence[str],
     manifest_entries: Collection[dict] | None = None,
+    allow_flag_variables: bool = False,
 ) -> None:
     """Raise ValueError if any requested variable is a flag column.
 
@@ -55,12 +60,22 @@ def _validate_requested_variables(
             Path to collection's dir containing _MANIFEST.yaml.
         variables (Sequence[str]):
             IPUMS variable names, e.g. ["AGE", "SEX"].
+        manifest_entries (Collection[dict] | None):
+            Already-read _MANIFEST.yaml entries, to save a second read. None
+            re-reads `collection_dir`.
+        allow_flag_variables (bool):
+            Submit anyway, logging instead of raising. The verdict comes from
+            a label heuristic over every codebook in the directory, so a
+            reworded label or a hand-copied .xml can make a legitimate
+            variable permanently unrequestable - this is the way out that
+            does not involve deleting files.
 
     Returns:
         None.
 
     Raises:
-        ValueError, if any variable is identified as a flag.
+        ValueError, if any variable is identified as a flag and
+        `allow_flag_variables` is False.
     """
     registry = collection_flag_registry(collection_dir, manifest_entries)
     if not registry:
@@ -74,10 +89,11 @@ def _validate_requested_variables(
         sources = ", ".join(registry.sources_of(variable))
         if kind == "quality":
             problems.append(
-                f"{variable} is the IPUMS data quality flag for {sources}, not a "
-                f"requestable variable. Drop it from `variables` and pass "
-                f"data_quality_flags=True - the flag column is added "
-                f"automatically for every requested variable that has one."
+                f"{variable} is the IPUMS data quality flag for {sources}, not "
+                f"a requestable variable. Request {sources} instead and pass "
+                f"data_quality_flags=True - the flag column is then added "
+                f"automatically. Dropping {variable} without requesting "
+                f"{sources} yields an extract with no flag column at all."
             )
         else:
             problems.append(
@@ -86,8 +102,23 @@ def _validate_requested_variables(
                 f"delivered automatically alongside {sources} regardless of "
                 f"data_quality_flags."
             )
-    if problems:
-        raise ValueError("\n".join(problems))
+    if not problems:
+        return
+    log.warning(
+        "ipums_flag_variable_requested",
+        collection_dir=str(collection_dir),
+        # the flagged names, not the whole request - the whole request is what
+        # the caller already has, the verdict is what it does not
+        flagged=sorted(v for v in variables if registry.kind_of(v) is not None),
+        allowed=allow_flag_variables,
+    )
+    if allow_flag_variables:
+        return
+    raise ValueError(
+        "\n".join(problems)
+        + "\n\nIf this is wrong - a mislabeled or hand-copied codebook - "
+        "re-run with allow_flag_variables=True to submit the request anyway."
+    )
 
 
 def find_matching_extract(
@@ -96,6 +127,7 @@ def find_matching_extract(
     variables: Sequence[str],
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
+    manifest_entries: Collection[dict] | None = None,
 ) -> tuple[Path, Path, int] | None:
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
@@ -117,6 +149,9 @@ def find_matching_extract(
             A form of data pulled: Hierarchical or rectangular data.
         data_quality_flags (bool):
             Whether to pull IPUMS Data quality flags.
+        manifest_entries (Collection[dict] | None):
+            Already-read _MANIFEST.yaml entries, to save a second read. None
+            re-reads `collection_dir`.
 
     Returns:
         tuple[Path, Path, int] | None: `(data_path, ddi_path, extract_id)` for
@@ -126,10 +161,14 @@ def find_matching_extract(
     requested_samples = set(samples)
     requested_variables = set(variables)
     match = None
-    for entry in read_manifest(collection_dir):
-        _REQUIRED = ("samples", "variables", "ddi_path", "extract_id")
+    entries = (
+        list(manifest_entries)
+        if manifest_entries is not None
+        else read_manifest(collection_dir)
+    )
+    for entry in entries:
         metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or not all(k in metadata for k in _REQUIRED):
+        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
             log.warning(
                 "ipums_manifest_entry_skipped",
                 reason="missing_required_metadata_keys",
@@ -197,6 +236,7 @@ class IPUMSExtractor(Extractor):
         data_structure: dict[str, dict[str, str]] | None = None,
         request_kind: RequestKind = "new_samples",
         force: bool = False,
+        allow_flag_variables: bool = False,
     ) -> ExtractionRecord:
         """Pull a microdata extract for `collection` and save the raw .dat.gz +
         DDI .xml codebook as-is.
@@ -208,6 +248,8 @@ class IPUMSExtractor(Extractor):
                 IPUMS sample IDs, e.g. ["cps2006_09s"]
             variables(Sequence[str]):
                 IPUMS variable names, e.g. ["AGE", "SEX"]
+            description (str):
+                Free-text label sent to IPUMS and recorded on the extract
             data_quality_flags (bool):
                 Whether to pull IPUMS Data quality flags
             data_structure (dict[...]):
@@ -221,6 +263,10 @@ class IPUMSExtractor(Extractor):
                 Submit and download a new extract even if a manifest entry
                 already covers this exact (samples, variables) request, instead
                 of reusing it
+            allow_flag_variables (bool):
+                Submit even if a requested name looks like a flag column. The
+                check is a label heuristic over the codebooks on disk; this is
+                the override for when it is wrong
 
         Returns:
             ExtractionRecord. Contains entry records both what was requested and
@@ -230,7 +276,8 @@ class IPUMSExtractor(Extractor):
         Raises:
             ValueError
                 A requested variable is a flag column already known from a
-                codebook on disk; nothing is submitted.
+                codebook on disk and `allow_flag_variables` is False; nothing
+                is submitted.
             BadIpumsApiRequest
                 The API rejected the request. Re-raised with the verbatim server
                 message plus guidance about flag columns.
@@ -243,11 +290,17 @@ class IPUMSExtractor(Extractor):
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
+        # ipumspy upper-cases Variable.name on construction, and
+        # add_data_quality_flags resolves by exact string match - so normalize
+        # before anything looks a name up, or a lower-case request silently
+        # yields a flagless extract.
         variables = tuple(v.upper() for v in variables)
-        # One read, three consumers: the flag registry, the cache lookup, and
-        # (eventually) coverage.
+        # One read, two consumers: the flag registry and the cache lookup.
+        # build_coverage (extract_incremental only) still reads for itself.
         manifest_entries = read_manifest(collection_dir)
-        _validate_requested_variables(collection_dir, variables, manifest_entries)
+        _validate_requested_variables(
+            collection_dir, variables, manifest_entries, allow_flag_variables
+        )
 
         effective_data_structure = (
             data_structure if data_structure is not None else _default_data_structure()
@@ -262,6 +315,7 @@ class IPUMSExtractor(Extractor):
                 variables,
                 effective_data_structure,
                 data_quality_flags,
+                manifest_entries,
             )
         )
         if cached is not None:
@@ -376,6 +430,7 @@ class IPUMSExtractor(Extractor):
         data_structure: dict[str, dict[str, str]] | None = None,
         description: str = "",
         force: bool = False,
+        allow_flag_variables: bool = False,
     ) -> list[ExtractionRecord]:
         """Extract just enough to cover `samples`/`variables`, given what this
         collection already has on disk per _MANIFEST.yaml.
@@ -415,7 +470,10 @@ class IPUMSExtractor(Extractor):
             force (bool):
                 If True, submit and download a new extract even if
                 a manifest entry already covers this exact request
-                (samples, variables) , instead of reusing it
+                (samples, variables), instead of reusing it
+            allow_flag_variables (bool):
+                Forwarded to extract(): submit even if a requested name looks
+                like a flag column.
 
         Returns:
             list[ExtractionRecord]:
@@ -446,6 +504,7 @@ class IPUMSExtractor(Extractor):
                     description=description,
                     request_kind=request_kind,
                     force=True,
+                    allow_flag_variables=allow_flag_variables,
                 )
                 for group_samples, request_kind in groups
             ]
@@ -475,6 +534,7 @@ class IPUMSExtractor(Extractor):
                 request_kind=plan.request_kind,
                 data_quality_flags=data_quality_flags,
                 data_structure=data_structure,
+                allow_flag_variables=allow_flag_variables,
             )
             for plan in planned
         ]

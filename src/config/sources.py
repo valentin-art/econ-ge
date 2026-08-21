@@ -231,6 +231,16 @@ class IPUMSExtractRequest(NamedTuple):
     variables: tuple[str, ...]
     description: str = ""
     data_quality_flags: bool = True
+    # None leaves the extractor's rectangular-on-P default in place. Per
+    # request rather than pipeline-wide because a hierarchical pull is a
+    # property of what a collection is for, not of a given run.
+    #
+    # CAVEAT: a dict makes the instance unhashable, so a request that sets this
+    # cannot go in a set or serve as a dict key while one that leaves it None
+    # can. Nothing hashes IPUMSExtractRequest today; keep it that way, or
+    # change this to an immutable shape first. The dict form is what ipumspy's
+    # MicrodataExtract takes, hence the choice.
+    data_structure: dict[str, dict[str, str]] | None = None
 
 
 # Microdata extracts pulled by the IPUMS extract/parse pipeline.

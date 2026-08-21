@@ -36,8 +36,10 @@ def extract_ipums_extracts(
     several prior extracts.
 
     Args:
-        api_key (str):
-            IPUMS API registration key (settings.ipums_api_key).
+        api_key (str | None):
+            IPUMS API registration key (settings.ipums_api_key). Empty or None
+            raises rather than falling back to the environment - a silent
+            fallback would spend account quota unasked.
         extracts(list[IPUMSExtractRequest] | None):
             Requests to pull; defaults to sources.IPUMS_EXTRACTS.
         force (bool):
@@ -50,11 +52,13 @@ def extract_ipums_extracts(
             a flag column to each requested variable that has one; the flag
             column is never listed in a request's `variables`.
         data_structure (dict[str, dict[str, str]] | None):
-            Applied to every request, e.g. {"hierarchical": {}} for a
-            hierarchical pull. None (the default) leaves the extractor's
-            rectangular-on-P default in place. It is a cache dimension in
-            extractors.ipums_coverage.find_matching_extract, so changing it
-            makes prior extracts of the same samples/variables non-matching.
+            Override every request's own `data_structure` field, e.g.
+            {"hierarchical": {}}. None (the default) leaves each request to
+            decide, which is itself the extractor's rectangular-on-P default
+            unless the request says otherwise - the same None-sentinel shape
+            as `data_quality_flags`. It is a cache dimension in
+            extractors.ipums_api.find_matching_extract, so changing it makes
+            prior extracts of the same samples/variables non-matching.
 
     Returns:
         list[ExtractionRecord]
@@ -70,7 +74,7 @@ def extract_ipums_extracts(
         raise RuntimeError("IPUMS_API_KEY is empty - cannot extract IPUMS data")
     extracts = extracts if extracts is not None else sources.IPUMS_EXTRACTS
 
-    log.info("ipums_extract_pipeline_start", n_extracts=len(extracts), force=force)
+    log.info("ipums_extract_pipeline_start", n_requests=len(extracts), force=force)
     extractor = IPUMSExtractor(api_key=api_key)
     records: list[ExtractionRecord] = []
     for req in extracts:
@@ -87,7 +91,9 @@ def extract_ipums_extracts(
                         if data_quality_flags is None
                         else data_quality_flags
                     ),
-                    data_structure=data_structure,
+                    data_structure=(
+                        req.data_structure if data_structure is None else data_structure
+                    ),
                 )
             )
         except Exception:
@@ -101,6 +107,7 @@ def extract_ipums_extracts(
                 collection=req.collection,
                 samples=list(req.samples),
                 n_records_discarded=len(records),
+                exc_info=True,
             )
             raise
     log.info(

@@ -38,6 +38,11 @@ from src.extractors.manifest import read_manifest
 
 log = structlog.get_logger(__name__)
 
+# Keys build_coverage reads without a fallback. Kept as frozensets at module
+# scope so the per-entry loop does not rebuild them.
+_REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path"})
+_REQUIRED_ENTRY = frozenset({"file_path", "extraction_id"})
+
 _SAMPLE_YEAR_RE = re.compile(r"(\d{4})")
 
 _COVERAGE_FILENAME = "_COVERAGE.yaml"
@@ -137,13 +142,25 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
 
     for entry in read_manifest(collection_dir):
         metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if (
-            not isinstance(metadata, dict)
-            or not {"samples", "variables", "ddi_path"} <= metadata.keys()
-        ):
-            log.warning("ipums_manifest_entry_skipped", entry=str(entry)[:200])
+        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="missing_required_metadata_keys",
+                entry=str(entry)[:200],
+            )
             continue
-        data_path = Path(entry.get("file_path", ""))
+        # Both are read below without a further guard, and neither can be
+        # defaulted: Path("") is Path(".") - which exists - so a missing
+        # file_path would sail past the existence check and be counted as
+        # covered, hiding a sample that was never actually downloaded.
+        if not _REQUIRED_ENTRY <= entry.keys():
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="missing_required_entry_keys",
+                entry=str(entry)[:200],
+            )
+            continue
+        data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
 
         if not data_path.exists() or not ddi_path.exists():
