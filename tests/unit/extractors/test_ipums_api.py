@@ -14,6 +14,7 @@ import pytest
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
 from src.extractors.ipums_api import IPUMSExtractor
+from src.extractors.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
 from src.extractors.manifest import read_manifest
 
 _FAKE_API_KEY = "fake-key"  # pragma: allowlist secret
@@ -464,11 +465,13 @@ def test_extract_records_delivered_variables_and_flag_maps(
 
     # What was asked for stays exactly what was asked for...
     assert record.metadata["variables"] == ("INCWAGE",)
-    # ...and what arrived is recorded separately: the flag column IPUMS
-    # attached, plus the technical columns it preselects.
     assert "QINCWAGE" in record.metadata["delivered_variables"]
     assert "YEAR" in record.metadata["delivered_variables"]
     assert record.metadata["quality_flags"] == {"INCWAGE": ["QINCWAGE"]}
+    # The stamp is what lets collection_flag_registry trust this map instead of
+    # re-parsing the codebook - see FLAG_PARSER_VERSION.
+    assert record.metadata["flag_parser_version"] == FLAG_PARSER_VERSION
+    assert summary_from_metadata(record.metadata) is not None  # write/read round trip
 
 
 def test_extract_records_delivered_variables_on_cache_hit(

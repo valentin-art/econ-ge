@@ -458,12 +458,14 @@ def collection_flag_registry(
         # the whole collection.
         metadata = entry.get("metadata") if isinstance(entry, dict) else None
         if not isinstance(metadata, dict):
-            if metadata is not None:
-                log.warning(
-                    "ipums_manifest_entry_malformed",
-                    collection_dir=str(collection_dir),
-                    entry=str(entry)[:200],
-                )
+            # Warn for both shapes: a scalar `metadata:` and a stray non-mapping
+            # entry in the YAML list. Silence here is what makes a corrupted
+            # manifest look like an empty one.
+            log.warning(
+                "ipums_manifest_entry_malformed",
+                collection_dir=str(collection_dir),
+                entry=str(entry)[:200],
+            )
             continue
         recorded = summary_from_metadata(metadata)
         if recorded is not None:

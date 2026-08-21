@@ -307,3 +307,12 @@ def test_plan_delta_requests_diffs_requested_not_delivered() -> None:
     assert len(planned) == 1
     assert planned[0].request_kind == "variable_delta"
     assert planned[0].variables == ("AGE",)
+
+
+def test_build_coverage_skips_a_malformed_entry(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    (collection_dir / "_MANIFEST.yaml").write_text(
+        "- extraction_id: cps_00001\n  metadata: not-a-mapping\n"
+    )
+    assert build_coverage(collection_dir, "cps").samples == {}

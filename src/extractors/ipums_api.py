@@ -127,9 +127,21 @@ def find_matching_extract(
     requested_variables = set(variables)
     match = None
     for entry in read_manifest(collection_dir):
+        _REQUIRED = ("samples", "variables", "ddi_path", "extract_id")
         metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or "samples" not in metadata:
-            log.warning("ipums_manifest_entry_skipped", entry=str(entry)[:200])
+        if not isinstance(metadata, dict) or not all(k in metadata for k in _REQUIRED):
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="missing_required_metadata_keys",
+                entry=str(entry)[:200],
+            )
+            continue
+        if "file_path" not in entry:
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="no_file_path",
+                entry=str(entry)[:200],
+            )
             continue
         if set(metadata["samples"]) != requested_samples:
             continue
@@ -231,10 +243,11 @@ class IPUMSExtractor(Extractor):
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
-        # ipumspy upper-cases Variable.name on construction, and add_data_quality_flags
-        # resolves by exact string match - so normalize before anything looks a name up.
         variables = tuple(v.upper() for v in variables)
-        _validate_requested_variables(collection_dir, variables)
+        # One read, three consumers: the flag registry, the cache lookup, and
+        # (eventually) coverage.
+        manifest_entries = read_manifest(collection_dir)
+        _validate_requested_variables(collection_dir, variables, manifest_entries)
 
         effective_data_structure = (
             data_structure if data_structure is not None else _default_data_structure()

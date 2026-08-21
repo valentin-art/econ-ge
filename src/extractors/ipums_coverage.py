@@ -136,9 +136,16 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     extraction_ids_by_sample: dict[str, list[str]] = {}
 
     for entry in read_manifest(collection_dir):
-        metadata = entry["metadata"]
-        data_path = Path(entry["file_path"])
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if (
+            not isinstance(metadata, dict)
+            or not {"samples", "variables", "ddi_path"} <= metadata.keys()
+        ):
+            log.warning("ipums_manifest_entry_skipped", entry=str(entry)[:200])
+            continue
+        data_path = Path(entry.get("file_path", ""))
         ddi_path = Path(metadata["ddi_path"])
+
         if not data_path.exists() or not ddi_path.exists():
             continue
         delivered = _delivered_variables(entry, ddi_path)
