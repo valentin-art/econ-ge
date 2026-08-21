@@ -12,33 +12,61 @@ Flag for INCFARM". That label is the only signal used here.
 Classes:
     DDISummary:
         Collects a content of a codebook: variables and quality/topcode flags.
+    FlagRegistry:
+        Every flag column known for a collection, mapped back to its source
+        variable(s).
 
 Functions:
     parse_flag_label(..):
         Takes a variable label string and returns its flag kind.
-    _summarize_codebook(..):
-        Returns information about variables and quality/topcode flags.
     summarize_ddi(..):
         Returns information about variables and quality/topcode flags.
-        wraps _summarize_codebook().
     try_summarize_ddi(..):
-        A version of summarize_ddi() that  prints warning instead of
-        raising error in case of corrupted raw XML-codebook.
+        A version of summarize_ddi() that logs a warning instead of raising
+        in case of a corrupted raw XML-codebook. Memoized per codebook.
+    clear_ddi_summary_cache():
+        Empties that memo - for tests, and for a codebook rewritten in place.
+    summary_from_metadata(..):
+        Rebuild a DDISummary from what a manifest entry recorded, if the entry
+        was written by the current FLAG_PARSER_VERSION.
+    registry_from_summaries(..):
+        Unions several DDI summaries into one FlagRegistry, inverting each
+        summary's source-variable -> flag-names maps.
+    collection_flag_registry(..):
+        Every flag known for a collection, resolved from the manifest's
+        recorded maps, then each entry's codebook, then any loose *.xml.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from ipumspy import Codebook, readers
 
+from src.extractors.manifest import read_manifest
+
 log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
+
+# Bump whenever parse_flag_label or its regexes change. extract() stamps this
+# into every manifest entry it writes; a recorded flag map carrying a different
+# stamp is ignored and re-derived from the codebook, so a parser fix reaches
+# entries written before it.
+#
+# The stamp gates only the flag maps read back by summary_from_metadata.
+# ipums_coverage._delivered_variables trusts a recorded `delivered_variables`
+# list regardless of version, so changing how _summarize_codebook enumerates
+# columns needs its own decision - this constant does not cover it.
+#
+# NOTE: entries written before this constant existed carry no stamp and there is
+# no update-in-place in extractors.manifest, so they re-parse their codebook on
+# every call - by design, and cheap next to one API round trip.
+FLAG_PARSER_VERSION = 1
 
 # Regex expressions aimed to recognize flags in local codebooks
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
@@ -105,7 +133,7 @@ def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
 class DDISummary:
     """What one extract's codebook says the extract's data file contains.
 
-    Atrributes:
+    Attributes:
         ddi_path (Path):
             Path that contains dictionaries.
         variables (tuple[...]):
@@ -125,6 +153,8 @@ class DDISummary:
     Not hashable - see __hash__ below.
 
     Methods:
+        flag_names:
+            Property. Every flag column named here, of either kind.
         kind_of(name: str):
             Returns a kind of a flag for a given flag name, or nothing.
     """
@@ -262,7 +292,8 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
             Path to a codebook
 
     Returns:
-        DDISummary
+        DDISummary, or None if the codebook cannot be read or parsed - which
+        is the whole point of this wrapper over summarize_ddi().
     """
     try:
         key = _cache_key(ddi_path)
@@ -284,3 +315,211 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
         return None
     _SUMMARY_CACHE[key] = summary
     return summary
+
+
+def summary_from_metadata(
+    metadata: Mapping[str, Any], require_current_parser: bool = True
+) -> DDISummary | None:
+    """Rebuild a DDISummary from what a manifest entry recorded, without
+    touching the codebook. None if the entry predates those keys, or if the
+    flag maps were written by a different parser version.
+
+    Lets a reader keep working when the .xml itself has become unreadable but
+    the manifest entry written at download time is intact.
+
+    Args:
+        metadata (Mapping[str, Any]):
+            One manifest entry's `metadata` block. Not mutated.
+        require_current_parser (bool):
+            Reject a flag map not stamped with the current
+            FLAG_PARSER_VERSION. False accepts a stale map, for a caller that
+            has already established there is no codebook to re-derive from -
+            a possibly-outdated answer beats no answer for a heuristic whose
+            only job is "is this name a flag?".
+
+    Returns:
+        DDISummary, or None if the entry carries nothing usable.
+
+    Note:
+        An entry with no recorded `ddi_path` yields `ddi_path=Path(".")` - a
+        marker, not a location, and one that passes `.exists()`. Do not treat
+        `summary.ddi_path` from this function as a codebook without checking
+        `.suffix == ".xml"`.
+    """
+    delivered = metadata.get("delivered_variables")
+    if not delivered:
+        return None
+
+    # A map produced by an older parse_flag_label is not trusted: the codebook
+    # next to it on disk is the ground truth, so let the caller re-derive.
+    # `!=` rather than `<` is deliberate - it also rejects a map written by a
+    # newer checkout, and it is right when YAML hands the stamp back as "1".
+    if require_current_parser and (
+        metadata.get("flag_parser_version") != FLAG_PARSER_VERSION
+    ):
+        return None
+
+    quality = metadata.get("quality_flags")
+    topcode = metadata.get("topcode_flags")
+    quality_flags = quality if isinstance(quality, dict) else {}
+    topcode_flags = topcode if isinstance(topcode, dict) else {}
+
+    return DDISummary(
+        ddi_path=Path(str(metadata["ddi_path"]))
+        if metadata.get("ddi_path")
+        else Path(),
+        variables=tuple(delivered),
+        quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
+        topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
+    )
+
+
+@dataclass(frozen=True)
+class FlagRegistry:
+    """Flag column names known for a collection, mapped back to the variables
+    that they flag.
+
+    Built from codebooks already on disk, so a flag becomes known
+    once any extract has delivered it.
+
+    Attributes:
+        quality (Mapping[str, tuple[str, ...]]):
+            Read-only view mapping each quality flag column to the source
+            variable(s) it flags. NOTE: this is the inverse of
+            DDISummary.quality_flags, which maps source variable -> flag names.
+        topcode (Mapping[str, tuple[str, ...]]):
+            Same, for topcode flag columns.
+
+    Not hashable - see __hash__ below.
+
+    Methods:
+        kind_of(name):
+            "quality" / "topcode" for a known flag column, else None.
+        sources_of(name):
+            The source variable(s) `name` flags, or () if it is not a flag.
+        __bool__():
+            True if any quality/topcode flags exist.
+    """
+
+    quality: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    topcode: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    # quality/topcode hold unhashable MappingProxyType views, so the
+    # frozen=True default __hash__ would only fail by accident. Disabled
+    # explicitly rather than hashing a partial subset of fields nothing needs.
+    __hash__ = None  # type: ignore[assignment]
+
+    def kind_of(self, name: str) -> FlagKind | None:
+        """Which kind of flag `name` is, or None if it is not a flag."""
+        if name in self.quality:
+            return "quality"
+        if name in self.topcode:
+            return "topcode"
+        return None
+
+    def sources_of(self, name: str) -> tuple[str, ...]:
+        """Source variable(s) `name` flags, or () if `name` is not a flag."""
+        if name in self.quality:
+            return self.quality[name]
+        return self.topcode.get(name, ())
+
+    def __bool__(self) -> bool:
+        return bool(self.quality or self.topcode)
+
+
+def registry_from_summaries(summaries: Iterable[DDISummary | None]) -> FlagRegistry:
+    """Takes several DDI summaries and unions flags into one registry."""
+    quality: dict[str, list[str]] = {}
+    topcode: dict[str, list[str]] = {}
+    for summary in summaries:
+        if summary is None:
+            continue
+        for mapping, out in (
+            (summary.quality_flags, quality),
+            (summary.topcode_flags, topcode),
+        ):
+            for source, names in mapping.items():
+                for name in names:
+                    sources = out.setdefault(name, [])
+                    if source not in sources:
+                        sources.append(source)
+    return FlagRegistry(
+        quality=MappingProxyType({k: tuple(v) for k, v in quality.items()}),
+        topcode=MappingProxyType({k: tuple(v) for k, v in topcode.items()}),
+    )
+
+
+def collection_flag_registry(
+    collection_dir: Path,
+    manifest_entries: Collection[dict] | None = None,
+) -> FlagRegistry:
+    """Tries to collect all flags known for `collection_dir`.
+
+    Resolution order, cheapest first:
+      1. flag maps recorded in the manifest at download time - no file I/O;
+      2. the codebook itself, for entries written before those keys existed;
+      3. every *.xml in the directory, if there is no manifest at all.
+
+    `manifest_entries` lets a caller that has already read _MANIFEST.yaml pass
+    it in rather than re-reading it.
+    """
+
+    entries = (
+        list(manifest_entries)
+        if manifest_entries is not None
+        else read_manifest(collection_dir)
+    )
+
+    summaries: list[DDISummary | None] = []
+    for entry in entries:
+        # A hand-edited/truncated manifest can carry `metadata:` empty or as a
+        # scalar. This runs on every extract(), so one bad entry must not block
+        # the whole collection.
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if not isinstance(metadata, dict):
+            # Warn for both shapes: a scalar `metadata:` and a stray non-mapping
+            # entry in the YAML list. Silence here is what makes a corrupted
+            # manifest look like an empty one.
+            log.warning(
+                "ipums_manifest_entry_malformed",
+                collection_dir=str(collection_dir),
+                entry=str(entry)[:200],
+            )
+            continue
+        recorded = summary_from_metadata(metadata)
+        if recorded is not None:
+            summaries.append(recorded)
+            continue
+        # try to read from raw XML-codebooks
+        ddi_path = metadata.get("ddi_path")
+        if ddi_path and Path(ddi_path).exists():
+            summaries.append(try_summarize_ddi(Path(ddi_path)))
+            continue
+        # Codebook gone and the recorded map stamped out by an older parser:
+        # a stale flag map still beats "this name is not a flag", which costs a
+        # rejected API round trip. Use it - but never silently.
+        stale = summary_from_metadata(metadata, require_current_parser=False)
+        if stale is not None:
+            log.info(
+                "ipums_flag_map_stale_but_used",
+                collection_dir=str(collection_dir),
+                ddi_path=str(ddi_path),
+                recorded_version=metadata.get("flag_parser_version"),
+            )
+            summaries.append(stale)
+
+    # If nothing usable came out of the manifest (no entries, or every recorded
+    # codebook is unreadable), sweep the directory itself.
+    if (
+        not any(summary is not None for summary in summaries)
+        and collection_dir.exists()
+    ):
+        summaries = [
+            try_summarize_ddi(path) for path in sorted(collection_dir.glob("*.xml"))
+        ]
+
+    return registry_from_summaries(summaries)

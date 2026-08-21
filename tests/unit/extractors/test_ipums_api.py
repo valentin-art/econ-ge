@@ -10,7 +10,12 @@ configured) to confirm live connectivity beyond what the tests below cover.
 
 from pathlib import Path
 
+import pytest
+import structlog.testing
+from ipumspy.api.exceptions import BadIpumsApiRequest
+
 from src.extractors.ipums_api import IPUMSExtractor
+from src.extractors.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
 from src.extractors.manifest import read_manifest
 
 _FAKE_API_KEY = "fake-key"  # pragma: allowlist secret
@@ -38,25 +43,77 @@ class _ClientMustNotBeCalled:
 class _SequentialFakeClient:
     """Simulates completed extracts with an auto-incrementing extract_id,
     without hitting the network - supports multiple submissions in one test.
+
+    Writes a real DDI codebook describing what IPUMS would actually deliver:
+    the requested variables, a flag column for each variable in `flags`, and
+    the technical columns IPUMS preselects. That superset is the whole point -
+    the extractor records delivered columns, and a `<codeBook/>` stub could
+    never exercise it.
     """
 
-    def __init__(self, start_id: int = 100) -> None:
+    def __init__(
+        self,
+        start_id: int = 100,
+        flags: dict[str, list[str]] | None = None,
+        technical: tuple[str, ...] = ("YEAR", "SERIAL", "PERNUM"),
+        make_ddi_xml=None,
+    ) -> None:
         self._next_id = start_id
         self.submit_calls = 0
+        self.submitted: list[dict] = []
+        self.flags = flags or {}
+        self.technical = technical
+        self._make_ddi_xml = make_ddi_xml
 
     def submit_extract(self, extract) -> None:
         self.submit_calls += 1
+        self.submitted.append(extract.build())
         extract._id = self._next_id
         self._next_id += 1
 
     def wait_for_extract(self, extract) -> None:
         pass
 
+    def _ddi_xml(self, extract) -> str:
+        requested = [v.name for v in extract.variables]
+        variables = [(name, name.title(), 2) for name in self.technical]
+        for name in requested:
+            variables.append((name, name.title(), 2))
+            for flag in self.flags.get(name, []):
+                variables.append((flag, f"Data quality flag for {name}", 1))
+        return self._make_ddi_xml(variables)
+
     def download_extract(self, extract, download_dir: Path) -> None:
         collection = extract.collection
         extract_id = extract.extract_id
         (download_dir / f"{collection}_{extract_id:05d}.dat.gz").write_bytes(b"data")
-        (download_dir / f"{collection}_{extract_id:05d}.xml").write_text("<codeBook/>")
+        ddi_path = download_dir / f"{collection}_{extract_id:05d}.xml"
+        if self._make_ddi_xml is None:
+            # Deliberately unreadable: exercises the path where a codebook
+            # cannot be summarized and the entry is recorded without
+            # delivered_variables.
+            ddi_path.write_text("<codeBook/>")
+        else:
+            ddi_path.write_text(self._ddi_xml(extract), encoding="utf-8")
+
+
+class _BadRequestFakeClient:
+    """Rejects every submission the way the IPUMS API rejects an unknown
+    variable name: HTTP 400 -> BadIpumsApiRequest carrying the server's text.
+    """
+
+    # Verbatim from the live API on 2026-08-16 for
+    # variables=["QOINCWAGE"], samples=["cps1989_03s"].
+    detail = "Invalid mnemonic: QOINCWAGE"
+
+    def submit_extract(self, extract) -> None:
+        raise BadIpumsApiRequest(self.detail)
+
+    def wait_for_extract(self, extract) -> None:
+        raise AssertionError("wait_for_extract should not run after a failed submit")
+
+    def download_extract(self, extract, download_dir: Path) -> None:
+        raise AssertionError("download_extract should not run after a failed submit")
 
 
 def _seed_manifest_entry(
@@ -387,6 +444,467 @@ def test_extract_records_force_in_metadata(tmp_path: Path) -> None:
 
     assert default_record.metadata["force"] is False
     assert forced_record.metadata["force"] is True
+
+
+# --- Data quality flags -----------------------------------------------------
+
+
+def test_extract_records_delivered_variables_and_flag_maps(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(
+            start_id=1, flags={"INCWAGE": ["QINCWAGE"]}, make_ddi_xml=make_ddi_xml
+        ),
+    )
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"]
+    )
+
+    # What was asked for stays exactly what was asked for...
+    assert record.metadata["variables"] == ("INCWAGE",)
+    assert "QINCWAGE" in record.metadata["delivered_variables"]
+    assert "YEAR" in record.metadata["delivered_variables"]
+    assert record.metadata["quality_flags"] == {"INCWAGE": ["QINCWAGE"]}
+    # The stamp is what lets collection_flag_registry trust this map instead of
+    # re-parsing the codebook - see FLAG_PARSER_VERSION.
+    assert record.metadata["flag_parser_version"] == FLAG_PARSER_VERSION
+    assert summary_from_metadata(record.metadata) is not None  # write/read round trip
+
+
+def test_extract_records_delivered_variables_on_cache_hit(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A cache hit re-reads the codebook of the extract it is reusing, so an
+    # entry written before these keys existed is backfilled rather than
+    # propagating the gap forward.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(
+            start_id=1, flags={"INCWAGE": ["QINCWAGE"]}, make_ddi_xml=make_ddi_xml
+        ),
+    )
+    extractor.extract(collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"])
+
+    extractor.client = _ClientMustNotBeCalled()
+    cached_record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"]
+    )
+
+    assert cached_record.metadata["cached"] is True
+    assert "QINCWAGE" in cached_record.metadata["delivered_variables"]
+
+
+def test_extract_tolerates_unparseable_ddi(tmp_path: Path) -> None:
+    # A codebook we cannot read must not fail an extract that has already been
+    # downloaded and already cost account quota.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),  # writes a <codeBook/> stub
+    )
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert "delivered_variables" not in record.metadata
+    assert len(read_manifest(tmp_path / "cps")) == 1
+
+
+def test_extract_rejects_known_quality_flag_before_submitting(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(
+            start_id=1, flags={"INCWAGE": ["QINCWAGE"]}, make_ddi_xml=make_ddi_xml
+        ),
+    )
+    extractor.extract(collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"])
+
+    extractor.client = _ClientMustNotBeCalled()
+    with pytest.raises(ValueError) as excinfo:
+        extractor.extract(
+            collection="cps", samples=["cps2007_09s"], variables=["QINCWAGE"]
+        )
+
+    message = str(excinfo.value)
+    assert "QINCWAGE" in message
+    assert "INCWAGE" in message
+    assert "data_quality_flags=True" in message
+    # the remedy is "request INCWAGE instead", not a bare "drop QINCWAGE" -
+    # dropping it alone yields an extract with no flag column at all
+    assert "Request INCWAGE instead" in message
+    assert "allow_flag_variables=True" in message
+
+
+def test_extract_allows_a_flag_variable_through_the_escape_hatch(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """The verdict is a label heuristic over whatever codebooks are on disk, so
+    a reworded label or a hand-copied .xml can make a legitimate variable
+    permanently unrequestable. allow_flag_variables is the way out that does
+    not involve deleting files - and it must say so in the log.
+    """
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(
+            start_id=1, flags={"INCWAGE": ["QINCWAGE"]}, make_ddi_xml=make_ddi_xml
+        ),
+    )
+    extractor.extract(collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"])
+
+    with structlog.testing.capture_logs() as logs:
+        record = extractor.extract(
+            collection="cps",
+            samples=["cps2007_09s"],
+            variables=["QINCWAGE"],
+            allow_flag_variables=True,
+        )
+
+    assert record.metadata["variables"] == ("QINCWAGE",)
+    requested = [
+        entry for entry in logs if entry["event"] == "ipums_flag_variable_requested"
+    ]
+    assert len(requested) == 1
+    assert requested[0]["allowed"] is True
+
+
+def test_extract_logs_when_it_rejects_a_flag_variable(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(
+            start_id=1, flags={"INCWAGE": ["QINCWAGE"]}, make_ddi_xml=make_ddi_xml
+        ),
+    )
+    extractor.extract(collection="cps", samples=["cps2006_09s"], variables=["INCWAGE"])
+
+    extractor.client = _ClientMustNotBeCalled()
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(ValueError):
+            extractor.extract(
+                collection="cps", samples=["cps2007_09s"], variables=["QINCWAGE"]
+            )
+
+    requested = [
+        entry for entry in logs if entry["event"] == "ipums_flag_variable_requested"
+    ]
+    assert len(requested) == 1
+    assert requested[0]["allowed"] is False
+
+
+def test_extract_rejects_known_topcode_flag_with_its_own_message(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A topcode flag arrives regardless of data_quality_flags, so telling the
+    # user to switch that on would be wrong advice.
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    (collection_dir / "cps_00001.xml").write_text(
+        make_ddi_xml(
+            [
+                ("INCFARM", "Farm income", 7),
+                ("TINCFARM", "Topcode Flag for INCFARM", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_ClientMustNotBeCalled()
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        extractor.extract(
+            collection="cps", samples=["cps2006_09s"], variables=["TINCFARM"]
+        )
+
+    message = str(excinfo.value)
+    assert "topcode flag for INCFARM" in message
+    assert "regardless of data_quality_flags" in message
+
+
+def test_extract_never_rejects_a_regular_q_or_t_prefixed_variable(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """TRANWORK/TRANTIME are ordinary IPUMS variables. Rejecting a name for
+    starting with T or Q would block legitimate requests, so detection reads
+    the codebook label and nothing else."""
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    (collection_dir / "cps_00001.xml").write_text(
+        make_ddi_xml(
+            [
+                ("TRANWORK", "Means of transportation to work", 2),
+                ("TRANTIME", "Travel time to work", 3),
+                ("INCWAGE", "Wage income", 7),
+                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+
+    # Same collection as the seeded codebook, so the registry is populated and
+    # genuinely consulted - it knows QINCWAGE is a flag and must still let
+    # TRANWORK/TRANTIME through.
+    extractor.extract(
+        collection="cps",
+        samples=["cps2006_09s"],
+        variables=["TRANWORK", "TRANTIME"],
+    )
+
+    assert client.submit_calls == 1
+
+
+def test_extract_lets_an_unknown_flag_name_reach_the_api(tmp_path: Path) -> None:
+    # Nothing on disk describes QOINCWAGE yet, so it cannot be rejected
+    # locally - it goes to the API, which is the designed fallback.
+    client = _BadRequestFakeClient()
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+
+    with pytest.raises(BadIpumsApiRequest):
+        extractor.extract(
+            collection="cps", samples=["cps1989_03s"], variables=["QOINCWAGE"]
+        )
+
+
+def test_extract_wraps_bad_api_request_with_flag_guidance(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_BadRequestFakeClient()
+    )
+
+    with pytest.raises(BadIpumsApiRequest) as excinfo:
+        extractor.extract(
+            collection="cps", samples=["cps1989_03s"], variables=["QOINCWAGE"]
+        )
+
+    message = str(excinfo.value)
+    # The server's own wording survives verbatim...
+    assert _BadRequestFakeClient.detail in message
+    # ...with the flag guidance appended, and the original chained.
+    assert "data_quality_flags=True" in message
+    assert isinstance(excinfo.value.__cause__, BadIpumsApiRequest)
+
+
+def test_extract_requests_per_variable_data_quality_flags(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # Guards the silent-kwarg regression: passing data_quality_flags to
+    # MicrodataExtract lands it in **kwargs as a top-level field while every
+    # per-variable entry still says false, and swallows a misspelled keyword.
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+
+    extractor.extract(
+        collection="cps",
+        samples=["cps2006_09s"],
+        variables=["AGE", "SEX"],
+        data_quality_flags=True,
+    )
+
+    built = client.submitted[0]
+    assert built["variables"]["AGE"]["dataQualityFlags"] is True
+    assert built["variables"]["SEX"]["dataQualityFlags"] is True
+
+
+def test_extract_omits_data_quality_flags_when_false(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+
+    extractor.extract(
+        collection="cps",
+        samples=["cps2006_09s"],
+        variables=["AGE"],
+        data_quality_flags=False,
+    )
+
+    assert client.submitted[0]["variables"]["AGE"]["dataQualityFlags"] is False
+
+
+def _seed_cached_entry(tmp_path: Path, make_ddi_xml) -> Path:
+    """One sound manifest entry for cps_00029 (cps2006_09s, AGE) with both files
+    on disk - enough for extract() to resolve a cache hit.
+    """
+    from src.extractors.base import build_extraction_record
+    from src.extractors.manifest import append_to_manifest
+
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    data_path = collection_dir / "cps_00029.dat.gz"
+    data_path.write_bytes(b"data")
+    ddi_path = collection_dir / "cps_00029.xml"
+    ddi_path.write_text(make_ddi_xml([("AGE", "Age", 2)]), encoding="utf-8")
+    append_to_manifest(
+        collection_dir,
+        build_extraction_record(
+            source="ipums_api",
+            extraction_id="cps_00029",
+            file_path=data_path,
+            metadata={
+                "collection": "cps",
+                "samples": ("cps2006_09s",),
+                "variables": ("AGE",),
+                "extract_id": 29,
+                "ddi_path": str(ddi_path),
+                "cached": False,
+            },
+        ),
+    )
+    return collection_dir
+
+
+def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # Entries predating those keys were pulled with today's defaults
+    # (rectangular-on-P, flags on). Treating a missing key as "different"
+    # would make every one of them a permanent cache miss and re-spend quota.
+    _seed_cached_entry(tmp_path, make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_ClientMustNotBeCalled()
+    )
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is True
+
+
+@pytest.mark.parametrize(
+    ("bad_entry", "reason"),
+    [
+        pytest.param(
+            {"extraction_id": "cps_00030", "metadata": "not-a-mapping"},
+            "missing_required_metadata_keys",
+            id="scalar_metadata",
+        ),
+        pytest.param(
+            {
+                "extraction_id": "cps_00030",
+                "metadata": {"samples": ["cps2006_09s"], "variables": ["AGE"]},
+            },
+            "missing_required_metadata_keys",
+            id="partial_metadata",
+        ),
+        pytest.param(
+            {
+                "metadata": {
+                    "samples": ["cps2006_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/cps_00030.xml",
+                    "extract_id": 30,
+                }
+            },
+            "no_file_path",
+            id="no_file_path",
+        ),
+    ],
+)
+def test_find_matching_extract_skips_a_malformed_entry(
+    tmp_path: Path, make_ddi_xml, bad_entry, reason: str
+) -> None:
+    """A truncated entry is skipped with a reason, and the sound entry beside it
+    still produces the cache hit - a corrupted manifest must not silently turn
+    into a fresh, quota-spending extract.
+    """
+    import yaml
+
+    collection_dir = _seed_cached_entry(tmp_path, make_ddi_xml)
+    manifest = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest.read_text())
+    manifest.write_text(yaml.safe_dump(entries + [bad_entry], sort_keys=False))
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_ClientMustNotBeCalled()
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        record = extractor.extract(
+            collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+        )
+
+    assert record.metadata["cached"] is True
+    skipped = [
+        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
+    ]
+    assert reason in [entry["reason"] for entry in skipped]
+
+
+def test_find_matching_extract_misses_when_flags_explicitly_differ(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+    extractor.extract(
+        collection="cps",
+        samples=["cps2006_09s"],
+        variables=["AGE"],
+        data_quality_flags=True,
+    )
+
+    extractor.extract(
+        collection="cps",
+        samples=["cps2006_09s"],
+        variables=["AGE"],
+        data_quality_flags=False,
+    )
+
+    # The cached extract has flag columns the flags-off request does not want,
+    # so it must not be reused.
+    assert client.submit_calls == 2
+
+
+def test_extract_accepts_lowercase_variable_names(tmp_path, make_ddi_xml) -> None:
+    client = _SequentialFakeClient(start_id=1, make_ddi_xml=make_ddi_xml)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["age"]
+    )
+    assert client.submitted[0]["variables"]["AGE"]["dataQualityFlags"] is True
+    assert record.metadata["variables"] == ("AGE",)
+
+
+def test_extract_incremental_accepts_lowercase_variable_names(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE", "SEX"])
+    client = _SequentialFakeClient(start_id=50)
+    extractor.client = client
+
+    records = extractor.extract_incremental(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE", "SEX", "race"]
+    )
+
+    assert client.submitted[0]["variables"]["RACE"]["dataQualityFlags"] is True
+    assert records[0].metadata["variables"] == ("RACE",)
 
 
 # --- Real-API test: commented out on purpose, see module docstring. ---
