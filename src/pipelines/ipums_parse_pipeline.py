@@ -1,10 +1,7 @@
-"""Bronze stage: raw IPUMS extract (external) -> tidy bronze parquet (data/bronze/ipums/).
+"""A module contains pipeline functions for parsing. It takes takes row data,
+transforms and stores it into bronze-layer parquet files.
 
-Companion to `pipelines.ipums_extract_pipeline` (IPUMS API -> external). Pure
-function of already-downloaded external .dat.gz/.xml files - no network.
-Also builds and saves each extract's DDI-derived JSON variable dictionary
-(data/reference/ipums/{collection}/{year}.json), mirroring
-`pipelines.bea_parse_pipeline`'s per-item parsing loop over `config.sources`.
+Also builds and saves each extract's DDI-derived JSON variable dictionary.
 """
 
 from pathlib import Path
@@ -29,19 +26,51 @@ from src.parsers.ipums import (
 
 log = structlog.get_logger(__name__)
 
+_REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"})
+_REQUIRED_ENTRY = frozenset({"file_path"})
+
 
 def _collection_manifest_entries(external_dir: Path, collection: str) -> list[dict]:
     """Manifest entries for `collection` whose data file and DDI codebook still
-    exist on disk, with "new_samples" entries ordered before "variable_delta"
-    ones (a delta merge needs an existing bronze file to merge into) while
-    preserving relative extraction order within each group. A missing
-    request_kind (manifest entries written before incremental extraction
-    existed) is treated as "new_samples".
+    exist on disk.
+
+    "new_samples" entries ordered before "variable_delta" ones (a delta merge needs
+    an existing bronze file to merge into) while preserving relative extraction
+    order within each group. A missing request_kind (manifest entries written before
+    incremental extraction existed) is treated as "new_samples".
+
+    NOTE: A hand-edited/truncated manifest can carry a malformed entry - missing
+    keys entirely, or `metadata:` empty/scalar. Skipped with a warning rather
+    than raised, so one bad entry does not abort parsing for the whole collection.
+
+    Args:
+        external_dir (Path):
+            A path containing raw data.
+        collection (str):
+            A collection name.
+
+    Return:
+        list[dict]:
+            A list of manifest entries corresponding to raw data for given collection.
     """
     collection_dir = external_dir / collection
     entries = []
     for entry in read_manifest(collection_dir):
-        metadata = entry["metadata"]
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="missing_required_metadata_keys",
+                entry=str(entry)[:200],
+            )
+            continue
+        if not _REQUIRED_ENTRY <= entry.keys():
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="no_file_path",
+                entry=str(entry)[:200],
+            )
+            continue
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
         if data_path.exists() and ddi_path.exists():
@@ -58,15 +87,28 @@ def _entry_needs_processing(
     variables: set[str],
     force: bool = False,
 ) -> bool:
-    """False only when every one of the entry's years is already in `coverage`
-    with every one of `variables` present - i.e. bronze (per the
-    reference-dir dictionaries) already fully reflects this entry, so it's
-    safe to skip re-parsing/re-merging it. If no year could be parsed from
-    any of the entry's sample ids, always process (fail safe rather than
-    silently skip on an ambiguous entry). force=True always returns True -
-    a deliberate forced refresh must never be skipped just because the
-    dictionaries already show it as covered, since that's usually exactly
-    why it was forced.
+    """Checks if a manifest entry needs to be processed (parsed/merged).
+
+    False only when every entry's year is already in `coverage` with all
+    `variables` already present - i.e. bronze already fully reflects this
+    entry. It's safe to skip re-parsing/re-merging it.
+
+    If no year could be parsed from any of the entry's sample ids, always
+    process (fail safe rather than silently skip on an ambiguous entry).
+
+    Args:
+        coverage (dict[int, set[str]]):
+            Data coverage dictionary (year, <set of variables>)
+        sample_years (set[int]):
+            A set of sample years that need to be parsed.
+        variables (set[str]):
+            A set of variables that need to be parsed.
+        force (bool):
+            Should the processing be forcely parsed.
+
+    Returns:
+        bool:
+            Whether to parse data or not (given coverage and parse request).
     """
     if force:
         return True
@@ -83,29 +125,15 @@ def parse_ipums_extracts(
     """Parse every already-downloaded IPUMS extract not yet reflected in bronze.
 
     For each distinct collection among `extracts`, walks every manifest entry
-    still backed by files on disk. extractors.ipums_api.IPUMSExtractor writes
-    one manifest entry per extract_incremental() submission, not one per
-    request - a single request can span several manifest entries once prior
-    coverage only needs a partial top-up. data/reference/ipums/{collection}/
-    (one JSON dictionary per year) is the source of truth for what's actually
-    already in bronze - the manifest can list more extracts than were ever
-    parsed, and an entry whose years/variables are already fully covered
-    there is skipped rather than reprocessed:
-      - "new_samples" entries build+save their DDI-derived JSON variable
-        dictionary and are parsed into bronze the normal way (one parquet
-        file per YEAR).
-      - "variable_delta" entries (extra variables pulled for samples/years
-        already in bronze) are instead merged onto the existing per-year
-        bronze files, via parsers.ipums.merge_variables_into_bronze.
+    still backed by files on disk.
 
-    Parameters
-    ----------
-    external_dir : the `ipums` external root, e.g. settings.paths.external / "ipums"
-    bronze_dir    : the `ipums` bronze root, e.g. settings.paths.bronze / "ipums"
-    extracts      : requests naming which collections to parse; defaults to
-                    sources.IPUMS_EXTRACTS. Only .collection is used - every
-                    on-disk extract for that collection is considered, not
-                    just the ones matching the request's own .samples/.variables.
+    Args:
+        external_dir (Path):
+            The path to raw data that needs to be parsed.
+        bronze_dir (Path):
+            The path to bronze data that has already been parsed before.
+        extracts (list[sources.IPUMSExtractRequest]):
+            Contain collections which need to be processes.
     """
     extracts = extracts if extracts is not None else sources.IPUMS_EXTRACTS
     collections = dict.fromkeys(req.collection for req in extracts)
@@ -130,12 +158,13 @@ def parse_ipums_extracts(
             extract_id = metadata["extract_id"]
             request_kind = metadata.get("request_kind", "new_samples")
             requested = list(metadata["variables"])
-            # The columns this entry actually contributes to bronze. A
-            # "new_samples" pull is written whole by parse_to_bronze, so that
-            # is every column in the file. A "variable_delta" merge keeps only
-            # its own columns - which must include the flag columns IPUMS
-            # attached to the requested variables, or they are silently
-            # dropped even though they are sitting in the .dat.gz.
+            # The columns this entry actually contributes to bronze.
+            #
+            # A "new_samples" pull is written whole by parse_to_bronze, so that
+            # is every column in the file.
+            # A "variable_delta" merge keeps only its own columns - which must
+            # include the flag columns IPUMS attached to the requested variables,
+            # or they are silently dropped even though they are in raw files.
             summary = try_summarize_ddi(ddi_path) or summary_from_metadata(metadata)
             if request_kind == "variable_delta":
                 entry_columns = merge_column_names(summary, requested)
