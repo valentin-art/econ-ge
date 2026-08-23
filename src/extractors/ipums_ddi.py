@@ -406,7 +406,7 @@ def flag_columns_for(
 def merge_column_names(
     summary: DDISummary | None,
     requested: Sequence[str],
-    include_topcode_flags: bool = True,
+    include_topcode: bool = True,
 ) -> list[str]:
     """Joins all variables together: source variables and quality/topcode flags.
 
@@ -415,7 +415,7 @@ def merge_column_names(
     """
     if summary is None:
         return list(requested)
-    flags = flag_columns_for(summary, requested, include_topcode=include_topcode_flags)
+    flags = flag_columns_for(summary, requested, include_topcode=include_topcode)
     requested_set = set(requested)
     return [*requested, *(name for name in flags if name not in requested_set)]
 

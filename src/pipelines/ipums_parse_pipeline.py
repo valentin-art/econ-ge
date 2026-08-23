@@ -136,6 +136,9 @@ def parse_ipums_extracts(
         collection (str):
             The IPUMS collection to parse (e.g. "cps").
         dictionaries_dir (Path | None):
+            A path to dictionaries for data to parse. None uses
+            data/reference/ipums/<collection>. Must match `collection` - a
+            mismatch reads and writes another collection's coverage silently.
 
     Returns:
         list[Path]:
@@ -167,6 +170,7 @@ def parse_ipums_extracts(
         extract_id = metadata["extract_id"]
         request_kind = metadata.get("request_kind", "new_samples")
         requested = list(metadata["variables"])
+        requested_set = set(requested)
         # The columns this entry actually contributes to bronze.
         #
         # A "new_samples" pull is written whole by parse_to_bronze, so that
@@ -215,7 +219,7 @@ def parse_ipums_extracts(
             extract_id=extract_id,
             request_kind=request_kind,
             n_columns=len(entry_columns),
-            flag_columns=[c for c in entry_columns if c not in set(requested)],
+            flag_columns=[c for c in entry_columns if c not in requested_set],
         )
 
         touched_years = [int(p.stem) for p in touched_paths]
