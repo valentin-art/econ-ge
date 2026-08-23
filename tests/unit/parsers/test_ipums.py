@@ -291,6 +291,7 @@ def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
         parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=2)
 
     assert good_path.read_bytes() == before
+    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
 
 
 def test_merge_variables_into_bronze_raises_when_no_merge_columns_present(

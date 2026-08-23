@@ -250,6 +250,7 @@ def parse_to_bronze(
     writers: dict[int, pq.ParquetWriter] = {}
     out_paths: dict[int, tuple[Path, Path]] = {}
     total_rows = 0
+    completed = False
     try:
         for chunk in iter_microdata:
             check_no_duplicate_columns(chunk)
@@ -266,6 +267,7 @@ def parse_to_bronze(
                     writers[year] = pq.ParquetWriter(tmp_path, table.schema)
                     out_paths[year] = (tmp_path, out_path)
                 writers[year].write_table(table)
+        completed = True
     finally:
         errors = []
         for writer in writers.values():
@@ -273,6 +275,12 @@ def parse_to_bronze(
                 writer.close()
             except Exception as e:
                 errors.append(e)
+        # Nothing downstream can tell a half-written .tmp.parquet from a
+        # complete one, and only a rename promotes it, so drop them here
+        # rather than leave them for the next run to trip over.
+        if not completed:
+            for tmp_path, _ in out_paths.values():
+                tmp_path.unlink(missing_ok=True)
         if errors:
             raise RuntimeError(
                 f"Failed to close {len(errors)} ParquetWriter(s) - "
@@ -280,6 +288,8 @@ def parse_to_bronze(
             ) from errors[0]
 
     if total_rows == 0:
+        for tmp_path, _ in out_paths.values():
+            tmp_path.unlink(missing_ok=True)
         raise ValueError("IPUMS extract has no rows")
 
     for year, (tmp_path, out_path) in out_paths.items():
