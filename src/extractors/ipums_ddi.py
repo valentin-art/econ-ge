@@ -29,6 +29,11 @@ Functions:
     summary_from_metadata(..):
         Rebuild a DDISummary from what a manifest entry recorded, if the entry
         was written by the current FLAG_PARSER_VERSION.
+    flag_columns_for(..):
+        Returns all flag columns belonging to variables.
+    merge_column_names(..):
+        Joins all variables together: source variables and quality/topcode
+        flags.
     registry_from_summaries(..):
         Unions several DDI summaries into one FlagRegistry, inverting each
         summary's source-variable -> flag-names maps.
@@ -38,7 +43,7 @@ Functions:
 """
 
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -372,6 +377,46 @@ def summary_from_metadata(
         quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
         topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
     )
+
+
+def flag_columns_for(
+    summary: DDISummary,
+    variables: Iterable[str],
+    include_topcode: bool = True,
+) -> tuple[str, ...]:
+    """Determine flag columns belonging to any of `variables`.
+
+    A flag shared by several source variables (QWKSWORK covers WKSWORK1 and
+    WKSWORK2) is included when any one of them is requested.
+    """
+    requested = set(variables)
+    mappings = [summary.quality_flags]
+    if include_topcode:
+        mappings.append(summary.topcode_flags)
+    wanted = {
+        name
+        for mapping in mappings
+        for source, names in mapping.items()
+        if source in requested
+        for name in names
+    }
+    return tuple(name for name in summary.variables if name in wanted)
+
+
+def merge_column_names(
+    summary: DDISummary | None,
+    requested: Sequence[str],
+    include_topcode_flags: bool = True,
+) -> list[str]:
+    """Joins all variables together: source variables and quality/topcode flags.
+
+    With summary=None, falls back to `requested` - exactly the behaviour before
+    flag columns were tracked.
+    """
+    if summary is None:
+        return list(requested)
+    flags = flag_columns_for(summary, requested, include_topcode=include_topcode_flags)
+    return [*requested, *(name for name in flags if name not in set(requested))]
 
 
 @dataclass(frozen=True)

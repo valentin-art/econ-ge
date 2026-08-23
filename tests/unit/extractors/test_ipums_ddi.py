@@ -16,6 +16,8 @@ from src.extractors.base import build_extraction_record
 from src.extractors.ipums_ddi import (
     FLAG_PARSER_VERSION,
     collection_flag_registry,
+    flag_columns_for,
+    merge_column_names,
     parse_flag_label,
     summarize_ddi,
     summary_from_metadata,
@@ -223,6 +225,68 @@ def test_summarize_ddi_raises_for_stub_codebook(tmp_path: Path) -> None:
 
     with pytest.raises(Exception):
         summarize_ddi(stub)
+
+
+# --- deriving column lists --------------------------------------------------
+
+
+def test_flag_columns_for_includes_shared_flag_when_one_source_requested(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    assert flag_columns_for(summary, ["WKSWORK1"]) == ("QWKSWORK", "QWKSWORKTEST")
+
+
+def test_flag_columns_for_excludes_topcode_when_disabled(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    with_topcode = flag_columns_for(summary, ["INCLONGJ"], include_topcode=True)
+    without = flag_columns_for(summary, ["INCLONGJ"], include_topcode=False)
+
+    assert with_topcode == ("QINCLONG", "QINCLONGD", "TINCLONGJ")
+    assert without == ("QINCLONG", "QINCLONGD")
+
+
+def test_merge_column_names_adds_flags_and_drops_technical_columns(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("YEAR", "Survey year", 4),
+        ("ASECWT", "ASEC weight", 5),
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    columns = merge_column_names(summary, ["INCWAGE"])
+
+    assert columns == ["INCWAGE", "QINCWAGE"]
+    # The preselected technical/weight columns must stay out: bronze already
+    # has them and merge_variables_into_bronze drops them for that reason.
+    assert "YEAR" not in columns
+    assert "ASECWT" not in columns
+
+
+def test_merge_column_names_falls_back_to_requested_when_summary_is_none() -> None:
+    assert merge_column_names(None, ["AGE", "SEX"]) == ["AGE", "SEX"]
+
+
+def test_merge_column_names_does_not_duplicate_a_requested_flag(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    assert merge_column_names(summary, ["INCWAGE", "QINCWAGE"]) == [
+        "INCWAGE",
+        "QINCWAGE",
+    ]
 
 
 # --- rebuilding a summary from a manifest entry ----------------------------
