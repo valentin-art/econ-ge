@@ -10,6 +10,7 @@ directions.
 from pathlib import Path
 
 import pytest
+import structlog.testing
 from ipumspy import readers
 
 from src.extractors.base import build_extraction_record
@@ -433,6 +434,65 @@ def test_collection_flag_registry_rederives_when_parser_version_is_stale(
     assert registry.sources_of("QINCWAGE") == ("INCWAGE",)
 
 
+def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_gone(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """Last tier of resolution: the stamp says the map is old, but the codebook
+    it would be re-derived from no longer exists. A possibly-outdated answer
+    beats "not a flag", which costs a rejected API round trip - and the entry
+    beside it must not mask the loss either, so this directory has two.
+    """
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    good_ddi = _write_ddi(
+        collection_dir, make_ddi_xml, [("AGE", "Age", 2)], name="cps_00001"
+    )
+    _seed_manifest(
+        collection_dir,
+        good_ddi,
+        "cps_00001",
+        {"delivered_variables": ["AGE"], "quality_flags": {}, "topcode_flags": {}},
+    )
+    gone_ddi = _write_ddi(
+        collection_dir, make_ddi_xml, [("INCWAGE", "Wage income", 7)], name="cps_00002"
+    )
+    _seed_manifest(
+        collection_dir,
+        gone_ddi,
+        "cps_00002",
+        {
+            "flag_parser_version": FLAG_PARSER_VERSION - 1,
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        },
+    )
+    gone_ddi.unlink()
+
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+    assert [entry["event"] for entry in logs if "stale" in entry["event"]] == [
+        "ipums_flag_map_stale_but_used"
+    ]
+
+
+def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
+    metadata = {
+        "ddi_path": "/tmp/cps_00001.xml",
+        "flag_parser_version": FLAG_PARSER_VERSION - 1,
+        "delivered_variables": ["INCWAGE", "QINCWAGE"],
+        "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+        "topcode_flags": {},
+    }
+
+    assert summary_from_metadata(metadata) is None
+    stale = summary_from_metadata(metadata, require_current_parser=False)
+    assert stale is not None
+    assert stale.quality_flags == {"INCWAGE": ("QINCWAGE",)}
+
+
 def test_collection_flag_registry_backfills_legacy_entry_from_ddi(
     tmp_path: Path, make_ddi_xml
 ) -> None:
@@ -525,3 +585,38 @@ def test_collection_flag_registry_accepts_preread_entries(
 
     assert registry.kind_of("QINCWAGE") == "quality"
     assert registry.sources_of("QINCWAGE") == ("INCWAGE",)
+
+
+@pytest.mark.parametrize(
+    "manifest_text",
+    [
+        "- extraction_id: cps_00001\n  metadata:\n",  # empty
+        "- extraction_id: cps_00001\n  metadata: not-a-mapping\n",  # scalar
+        "- just-a-string\n",  # non-dict entry
+    ],
+)
+def test_collection_flag_registry_survives_a_malformed_entry(
+    tmp_path: Path, make_ddi_xml, manifest_text: str
+) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    (collection_dir / "_MANIFEST.yaml").write_text(manifest_text)
+    _write_ddi(
+        collection_dir,
+        make_ddi_xml,
+        [
+            ("INCWAGE", "Wage income", 7),
+            ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+        ],
+    )
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    # the bad entry is skipped and the loose codebook still answers
+    assert registry.kind_of("QINCWAGE") == "quality"
+    # ...and it is skipped loudly. Warning for the empty and scalar shapes as
+    # well as the non-dict entry is what keeps a corrupted manifest from
+    # looking like an empty one.
+    assert [entry["event"] for entry in logs if "malformed" in entry["event"]] == [
+        "ipums_manifest_entry_malformed"
+    ]

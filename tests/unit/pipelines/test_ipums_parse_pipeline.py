@@ -3,10 +3,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from src.config.sources import IPUMSExtractRequest
 from src.extractors.base import build_extraction_record
-from src.extractors.manifest import append_to_manifest
+from src.extractors.manifest import MANIFEST_FILENAME, append_to_manifest, read_manifest
 from src.parsers.ipums import (
     bronze_path,
     load_variable_dictionary,
@@ -247,6 +248,66 @@ def test_force_refresh_replaces_variable_without_clobbering_other_columns(
     # values - otherwise the dictionary would keep describing AGE using the
     # bad prior pull's (possibly wrong) definition forever.
     assert dictionary["AGE"]["Description"] == "Age (corrected)"
+
+
+def test_malformed_manifest_entry_is_skipped_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hand-edited/truncated manifest can carry an entry with `metadata:`
+    # missing or scalar - extractors.ipums_ddi.collection_flag_registry and
+    # extractors.ipums_coverage.build_coverage already warn-and-skip this
+    # rather than raise; _collection_manifest_entries must do the same
+    # instead of aborting the whole pipeline run over one bad entry.
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(
+        "src.pipelines.ipums_parse_pipeline.settings.paths.root", data_root
+    )
+    external_dir = data_root / "external" / "ipums"
+    bronze_dir = data_root / "bronze" / "ipums"
+    collection_dir = external_dir / "cps"
+
+    full_ddi_xml = _DDI_TEMPLATE.format(
+        filename="full.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR + _SEX_VAR
+    )
+    full_data_path, full_ddi_path = _write_extract(
+        collection_dir, "full", full_ddi_xml, _FULL_DAT_TEXT
+    )
+    full_record = build_extraction_record(
+        source="ipums_api",
+        extraction_id="cps_00001",
+        file_path=full_data_path,
+        metadata={
+            "collection": "cps",
+            "samples": ("cps2006_09s",),
+            "variables": ("AGE", "SEX"),
+            "ddi_path": str(full_ddi_path),
+            "extract_id": 1,
+            "request_kind": "new_samples",
+            "force": False,
+        },
+    )
+    append_to_manifest(collection_dir, full_record)
+
+    # Simulate a hand-truncated manifest: append a malformed entry directly,
+    # bypassing append_to_manifest (which always writes well-formed records).
+    manifest_path = collection_dir / MANIFEST_FILENAME
+    entries = read_manifest(collection_dir)
+    entries.append({"extraction_id": "cps_00002", "metadata": None})
+    manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+    bronze_paths = parse_ipums_extracts(
+        external_dir,
+        bronze_dir,
+        extracts=[
+            IPUMSExtractRequest(
+                collection="cps", samples=("cps2006_09s",), variables=("AGE", "SEX")
+            )
+        ],
+    )
+
+    assert bronze_paths == [bronze_path(bronze_dir, "cps", 2006)]
+    result = pd.read_parquet(bronze_path(bronze_dir, "cps", 2006))
+    assert set(result.columns) == {"YEAR", "MONTH", "AGE", "SEX"}
 
 
 def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
