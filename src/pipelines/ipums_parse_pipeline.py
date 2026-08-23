@@ -8,7 +8,6 @@ from pathlib import Path
 
 import structlog
 
-from src.config import sources
 from src.config.settings import settings
 from src.extractors.ipums_coverage import parse_sample_year
 from src.extractors.ipums_ddi import (
@@ -120,111 +119,103 @@ def _entry_needs_processing(
 def parse_ipums_extracts(
     external_dir: Path,
     bronze_dir: Path,
-    extracts: list[sources.IPUMSExtractRequest] | None = None,
+    collection: str,
 ) -> list[Path]:
     """Parse every already-downloaded IPUMS extract not yet reflected in bronze.
 
-    For each distinct collection among `extracts`, walks every manifest entry
-    still backed by files on disk.
+    Walks every manifest entry for `collection` still backed by files on disk.
 
     Args:
         external_dir (Path):
             The path to raw data that needs to be parsed.
         bronze_dir (Path):
             The path to bronze data that has already been parsed before.
-        extracts (list[sources.IPUMSExtractRequest]):
-            Contain collections which need to be processes.
+        collection (str):
+            The IPUMS collection to parse (e.g. "cps").
     """
-    extracts = extracts if extracts is not None else sources.IPUMS_EXTRACTS
-    collections = dict.fromkeys(req.collection for req in extracts)
 
-    log.info("ipums_parse_pipeline_start", n_collections=len(collections))
+    log.info("ipums_parse_pipeline_start", collection=collection)
     bronze_paths: list[Path] = []
-    for collection in collections:
-        entries = _collection_manifest_entries(external_dir, collection)
-        if not entries:
-            raise RuntimeError(
-                f"No downloaded IPUMS extract found for collection "
-                f"{collection!r} in {external_dir / collection} - run "
-                f"extract_ipums_extracts first"
+    entries = _collection_manifest_entries(external_dir, collection)
+    if not entries:
+        raise RuntimeError(
+            f"No downloaded IPUMS extract found for collection "
+            f"{collection!r} in {external_dir / collection} - run "
+            f"extract_ipums_extracts first"
+        )
+    dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
+    coverage = bronze_coverage(dictionaries_dir)
+
+    for entry in entries:
+        metadata = entry["metadata"]
+        data_path = Path(entry["file_path"])
+        ddi_path = Path(metadata["ddi_path"])
+        extract_id = metadata["extract_id"]
+        request_kind = metadata.get("request_kind", "new_samples")
+        requested = list(metadata["variables"])
+        # The columns this entry actually contributes to bronze.
+        #
+        # A "new_samples" pull is written whole by parse_to_bronze, so that
+        # is every column in the file.
+        # A "variable_delta" merge keeps only its own columns - which must
+        # include the flag columns IPUMS attached to the requested variables,
+        # or they are silently dropped even though they are in raw files.
+        summary = try_summarize_ddi(ddi_path) or summary_from_metadata(metadata)
+        if request_kind == "variable_delta":
+            entry_columns = merge_column_names(summary, requested)
+        else:
+            entry_columns = (
+                list(summary.variables) if summary is not None else requested
             )
-        dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
-        coverage = bronze_coverage(dictionaries_dir)
+        variables = set(entry_columns)
+        sample_years = {
+            year
+            for sample in metadata["samples"]
+            if (year := parse_sample_year(sample)) is not None
+        }
 
-        for entry in entries:
-            metadata = entry["metadata"]
-            data_path = Path(entry["file_path"])
-            ddi_path = Path(metadata["ddi_path"])
-            extract_id = metadata["extract_id"]
-            request_kind = metadata.get("request_kind", "new_samples")
-            requested = list(metadata["variables"])
-            # The columns this entry actually contributes to bronze.
-            #
-            # A "new_samples" pull is written whole by parse_to_bronze, so that
-            # is every column in the file.
-            # A "variable_delta" merge keeps only its own columns - which must
-            # include the flag columns IPUMS attached to the requested variables,
-            # or they are silently dropped even though they are in raw files.
-            summary = try_summarize_ddi(ddi_path) or summary_from_metadata(metadata)
-            if request_kind == "variable_delta":
-                entry_columns = merge_column_names(summary, requested)
-            else:
-                entry_columns = (
-                    list(summary.variables) if summary is not None else requested
-                )
-            variables = set(entry_columns)
-            sample_years = {
-                year
-                for sample in metadata["samples"]
-                if (year := parse_sample_year(sample)) is not None
-            }
-
-            force = metadata.get("force", False)
-            if not _entry_needs_processing(
-                coverage, sample_years, variables, force=force
-            ):
-                log.info(
-                    "ipums_parse_entry_already_covered",
-                    collection=collection,
-                    extract_id=extract_id,
-                )
-                continue
-
-            if request_kind == "variable_delta":
-                touched_paths = merge_variables_into_bronze(
-                    data_path,
-                    ddi_path,
-                    collection,
-                    bronze_dir,
-                    new_variables=entry_columns,
-                    force=force,
-                )
-            else:
-                touched_paths = parse_to_bronze(
-                    data_path, ddi_path, collection, bronze_dir
-                )
-            bronze_paths.extend(touched_paths)
+        force = metadata.get("force", False)
+        if not _entry_needs_processing(coverage, sample_years, variables, force=force):
             log.info(
-                "ipums_parse_entry_complete",
+                "ipums_parse_entry_already_covered",
                 collection=collection,
                 extract_id=extract_id,
-                request_kind=request_kind,
-                n_columns=len(entry_columns),
-                flag_columns=[c for c in entry_columns if c not in set(requested)],
             )
+            continue
 
-            touched_years = [int(p.stem) for p in touched_paths]
-            build_and_save_variable_dictionary(
+        if request_kind == "variable_delta":
+            touched_paths = merge_variables_into_bronze(
+                data_path,
                 ddi_path,
-                dictionaries_dir,
-                touched_years,
+                collection,
+                bronze_dir,
+                new_variables=entry_columns,
                 force=force,
-                # A delta merge only wrote its own columns, so the dictionary
-                # must not claim the rest of the codebook - bronze_coverage
-                # reads these files as the record of what bronze holds.
-                variables=entry_columns if request_kind == "variable_delta" else None,
             )
-            for year in touched_years:
-                coverage.setdefault(year, set()).update(variables)
+        else:
+            touched_paths = parse_to_bronze(data_path, ddi_path, collection, bronze_dir)
+        bronze_paths.extend(touched_paths)
+        log.info(
+            "ipums_parse_entry_complete",
+            collection=collection,
+            extract_id=extract_id,
+            request_kind=request_kind,
+            n_columns=len(entry_columns),
+            flag_columns=[c for c in entry_columns if c not in set(requested)],
+        )
+
+        touched_years = [int(p.stem) for p in touched_paths]
+        build_and_save_variable_dictionary(
+            ddi_path,
+            dictionaries_dir,
+            touched_years,
+            force=force,
+            # A delta merge only wrote its own columns, so the dictionary
+            # must not claim the rest of the codebook - bronze_coverage
+            # reads these files as the record of what bronze holds.
+            variables=entry_columns if request_kind == "variable_delta" else None,
+        )
+        for year in touched_years:
+            coverage.setdefault(year, set()).update(variables)
     log.info("ipums_parse_pipeline_complete", n_bronze_paths=len(bronze_paths))
     return bronze_paths

@@ -5,7 +5,6 @@ import pandas as pd
 import pytest
 import yaml
 
-from src.config.sources import IPUMSExtractRequest
 from src.extractors.base import build_extraction_record
 from src.extractors.manifest import MANIFEST_FILENAME, append_to_manifest, read_manifest
 from src.parsers.ipums import (
@@ -231,11 +230,7 @@ def test_force_refresh_replaces_variable_without_clobbering_other_columns(
     parse_ipums_extracts(
         external_dir,
         bronze_dir,
-        extracts=[
-            IPUMSExtractRequest(
-                collection="cps", samples=("cps2006_09s",), variables=("AGE", "SEX")
-            )
-        ],
+        collection="cps",
     )
 
     result = pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).sort_values("MONTH")
@@ -298,11 +293,7 @@ def test_malformed_manifest_entry_is_skipped_not_raised(
     bronze_paths = parse_ipums_extracts(
         external_dir,
         bronze_dir,
-        extracts=[
-            IPUMSExtractRequest(
-                collection="cps", samples=("cps2006_09s",), variables=("AGE", "SEX")
-            )
-        ],
+        collection="cps",
     )
 
     assert bronze_paths == [bronze_path(bronze_dir, "cps", 2006)]
@@ -362,11 +353,7 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
     parse_ipums_extracts(
         external_dir,
         bronze_dir,
-        extracts=[
-            IPUMSExtractRequest(
-                collection="cps", samples=("cps2006_09s",), variables=("AGE", "SEX")
-            )
-        ],
+        collection="cps",
     )
 
     assert calls == [(data_path, ddi_path, "cps", bronze_dir)]
@@ -465,11 +452,7 @@ def _run_parse(external_dir: Path, bronze_dir: Path) -> None:
     parse_ipums_extracts(
         external_dir,
         bronze_dir,
-        extracts=[
-            IPUMSExtractRequest(
-                collection="cps", samples=("cps2006_09s",), variables=("AGE", "SEX")
-            )
-        ],
+        collection="cps",
     )
 
 
