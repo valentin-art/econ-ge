@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import structlog.testing
 import yaml
 
 from src.extractors.base import build_extraction_record
@@ -163,12 +164,9 @@ def _write_extract(
 
 
 def test_force_refresh_replaces_variable_without_clobbering_other_columns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
-    monkeypatch.setattr(
-        "src.pipelines.ipums_parse_pipeline.settings.paths.root", data_root
-    )
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
     reference_dir = data_root / "reference" / "ipums" / "cps"
@@ -231,6 +229,7 @@ def test_force_refresh_replaces_variable_without_clobbering_other_columns(
         external_dir,
         bronze_dir,
         collection="cps",
+        dictionaries_dir=reference_dir,
     )
 
     result = pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).sort_values("MONTH")
@@ -245,8 +244,36 @@ def test_force_refresh_replaces_variable_without_clobbering_other_columns(
     assert dictionary["AGE"]["Description"] == "Age (corrected)"
 
 
+@pytest.mark.parametrize(
+    ("bad_entry", "reason"),
+    [
+        pytest.param(
+            {"extraction_id": "cps_00002", "metadata": None},
+            "missing_required_metadata_keys",
+            id="metadata_scalar",
+        ),
+        pytest.param(
+            {"extraction_id": "cps_00002", "metadata": {"collection": "cps"}},
+            "missing_required_metadata_keys",
+            id="metadata_missing_required_keys",
+        ),
+        pytest.param(
+            {
+                "extraction_id": "cps_00002",
+                "metadata": {
+                    "samples": ["cps2006_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/delta.xml",
+                    "extract_id": 2,
+                },
+            },
+            "no_file_path",
+            id="entry_missing_file_path",
+        ),
+    ],
+)
 def test_malformed_manifest_entry_is_skipped_not_raised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, bad_entry: dict, reason: str
 ) -> None:
     # A hand-edited/truncated manifest can carry an entry with `metadata:`
     # missing or scalar - extractors.ipums_ddi.collection_flag_registry and
@@ -254,11 +281,9 @@ def test_malformed_manifest_entry_is_skipped_not_raised(
     # rather than raise; _collection_manifest_entries must do the same
     # instead of aborting the whole pipeline run over one bad entry.
     data_root = tmp_path / "data"
-    monkeypatch.setattr(
-        "src.pipelines.ipums_parse_pipeline.settings.paths.root", data_root
-    )
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
+    reference_dir = data_root / "reference" / "ipums" / "cps"
     collection_dir = external_dir / "cps"
 
     full_ddi_xml = _DDI_TEMPLATE.format(
@@ -287,18 +312,95 @@ def test_malformed_manifest_entry_is_skipped_not_raised(
     # bypassing append_to_manifest (which always writes well-formed records).
     manifest_path = collection_dir / MANIFEST_FILENAME
     entries = read_manifest(collection_dir)
-    entries.append({"extraction_id": "cps_00002", "metadata": None})
+    entries.append(bad_entry)
     manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
 
-    bronze_paths = parse_ipums_extracts(
-        external_dir,
-        bronze_dir,
-        collection="cps",
-    )
+    with structlog.testing.capture_logs() as logs:
+        bronze_paths = parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=reference_dir,
+        )
 
     assert bronze_paths == [bronze_path(bronze_dir, "cps", 2006)]
     result = pd.read_parquet(bronze_path(bronze_dir, "cps", 2006))
     assert set(result.columns) == {"YEAR", "MONTH", "AGE", "SEX"}
+    # Skipped *loudly* - a silent skip makes a corrupted manifest look like a
+    # short one, so the entry is never parsed and nothing says why.
+    assert [
+        entry["reason"]
+        for entry in logs
+        if entry["event"] == "ipums_manifest_entry_skipped"
+    ] == [reason]
+
+
+def test_raises_when_no_manifest_entry_is_backed_by_files(tmp_path: Path) -> None:
+    # An empty/absent manifest must raise rather than return [] - a silent
+    # empty result reads as "already up to date" and hides a failed extract.
+    data_root = tmp_path / "data"
+    external_dir = data_root / "external" / "ipums"
+
+    with pytest.raises(RuntimeError, match="No downloaded IPUMS extract found"):
+        parse_ipums_extracts(
+            external_dir,
+            data_root / "bronze" / "ipums",
+            collection="cps",
+            dictionaries_dir=data_root / "reference" / "ipums" / "cps",
+        )
+
+
+def test_dictionaries_dir_routes_reads_and_writes_away_from_the_default(
+    tmp_path: Path,
+) -> None:
+    # The injected directory must carry both halves: the dictionary is written
+    # there, and bronze_coverage reads it back from there on the next run.
+    data_root = tmp_path / "data"
+    external_dir = data_root / "external" / "ipums"
+    bronze_dir = data_root / "bronze" / "ipums"
+    elsewhere = tmp_path / "elsewhere" / "dictionaries"
+    collection_dir = external_dir / "cps"
+
+    full_ddi_xml = _DDI_TEMPLATE.format(
+        filename="full.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR + _SEX_VAR
+    )
+    data_path, ddi_path = _write_extract(
+        collection_dir, "full", full_ddi_xml, _FULL_DAT_TEXT
+    )
+    append_to_manifest(
+        collection_dir,
+        build_extraction_record(
+            source="ipums_api",
+            extraction_id="cps_00001",
+            file_path=data_path,
+            metadata={
+                "collection": "cps",
+                "samples": ("cps2006_09s",),
+                "variables": ("AGE", "SEX"),
+                "ddi_path": str(ddi_path),
+                "extract_id": 1,
+                "request_kind": "new_samples",
+                "force": False,
+            },
+        ),
+    )
+
+    parse_ipums_extracts(
+        external_dir, bronze_dir, collection="cps", dictionaries_dir=elsewhere
+    )
+
+    # Written to the injected directory, not the settings-derived default.
+    assert load_variable_dictionary(elsewhere, 2006)["AGE"]
+
+    # Second run: coverage read back from `elsewhere` marks 2006 done, so
+    # nothing is reparsed. This is the half that fails if only the write is
+    # routed and bronze_coverage still reads the default.
+    assert (
+        parse_ipums_extracts(
+            external_dir, bronze_dir, collection="cps", dictionaries_dir=elsewhere
+        )
+        == []
+    )
 
 
 def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
@@ -309,11 +411,9 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
     # asserting the exact arg list (not just that it was called) is what
     # would have caught it.
     data_root = tmp_path / "data"
-    monkeypatch.setattr(
-        "src.pipelines.ipums_parse_pipeline.settings.paths.root", data_root
-    )
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
+    reference_dir = data_root / "reference" / "ipums" / "cps"
     collection_dir = external_dir / "cps"
 
     full_ddi_xml = _DDI_TEMPLATE.format(
@@ -354,6 +454,7 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
         external_dir,
         bronze_dir,
         collection="cps",
+        dictionaries_dir=reference_dir,
     )
 
     assert calls == [(data_path, ddi_path, "cps", bronze_dir)]
@@ -377,7 +478,6 @@ _DELTA_MERGE_KEYS: list[tuple[str, str, int]] = [
 
 def _seed_bronze_and_delta(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     make_ddi_xml,
     make_fixed_width_dat,
     delta_vars: list[tuple[str, str, int]],
@@ -385,9 +485,6 @@ def _seed_bronze_and_delta(
 ) -> tuple[Path, Path, Path]:
     """A bronze year written by a full pull, plus a pending delta entry."""
     data_root = tmp_path / "data"
-    monkeypatch.setattr(
-        "src.pipelines.ipums_parse_pipeline.settings.paths.root", data_root
-    )
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
     reference_dir = data_root / "reference" / "ipums" / "cps"
@@ -448,32 +545,32 @@ def _seed_bronze_and_delta(
     return external_dir, bronze_dir, reference_dir
 
 
-def _run_parse(external_dir: Path, bronze_dir: Path) -> None:
+def _run_parse(external_dir: Path, bronze_dir: Path, reference_dir: Path) -> None:
     parse_ipums_extracts(
         external_dir,
         bronze_dir,
         collection="cps",
+        dictionaries_dir=reference_dir,
     )
 
 
 def test_variable_delta_merge_includes_quality_flag_columns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     delta_vars = [
         *_DELTA_MERGE_KEYS,
         ("INCWAGE", "Wage income", 6),
         ("QINCWAGE", "Data quality flag for INCWAGE", 1),
     ]
-    external_dir, bronze_dir, _ = _seed_bronze_and_delta(
+    external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
         requested=("INCWAGE",),
     )
 
-    _run_parse(external_dir, bronze_dir)
+    _run_parse(external_dir, bronze_dir, reference_dir)
 
     columns = set(pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).columns)
     assert "INCWAGE" in columns
@@ -483,30 +580,29 @@ def test_variable_delta_merge_includes_quality_flag_columns(
 
 
 def test_variable_delta_merge_includes_topcode_flag_column(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     delta_vars = [
         *_DELTA_MERGE_KEYS,
         ("INCFARM", "Farm income", 6),
         ("TINCFARM", "Topcode Flag for INCFARM", 1),
     ]
-    external_dir, bronze_dir, _ = _seed_bronze_and_delta(
+    external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
         requested=("INCFARM",),
     )
 
-    _run_parse(external_dir, bronze_dir)
+    _run_parse(external_dir, bronze_dir, reference_dir)
 
     columns = set(pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).columns)
     assert "TINCFARM" in columns
 
 
 def test_variable_delta_merge_still_drops_untouched_technical_columns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     # ASECWT rides along in the delta extract but was not requested and is not
     # a flag; merging it would collide with what bronze already holds.
@@ -516,16 +612,15 @@ def test_variable_delta_merge_still_drops_untouched_technical_columns(
         ("INCWAGE", "Wage income", 6),
         ("QINCWAGE", "Data quality flag for INCWAGE", 1),
     ]
-    external_dir, bronze_dir, _ = _seed_bronze_and_delta(
+    external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
         requested=("INCWAGE",),
     )
 
-    _run_parse(external_dir, bronze_dir)
+    _run_parse(external_dir, bronze_dir, reference_dir)
 
     columns = set(pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).columns)
     assert "QINCWAGE" in columns
@@ -533,7 +628,7 @@ def test_variable_delta_merge_still_drops_untouched_technical_columns(
 
 
 def test_variable_delta_dictionary_records_only_merged_columns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     # The reference dictionary is read back as the record of what bronze holds
     # (bronze_coverage). If it claims columns the merge dropped, the entry is
@@ -546,14 +641,13 @@ def test_variable_delta_dictionary_records_only_merged_columns(
     ]
     external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
         requested=("INCWAGE",),
     )
 
-    _run_parse(external_dir, bronze_dir)
+    _run_parse(external_dir, bronze_dir, reference_dir)
 
     dictionary = load_variable_dictionary(reference_dir, 2006)
     parquet_columns = set(pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).columns)
@@ -563,7 +657,7 @@ def test_variable_delta_dictionary_records_only_merged_columns(
 
 
 def test_variable_delta_is_reprocessed_when_only_its_flag_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     # The regression that made the flag gap unbackfillable: with the entry's
     # column set taken from `variables` alone, a bronze file already holding
@@ -575,7 +669,6 @@ def test_variable_delta_is_reprocessed_when_only_its_flag_is_missing(
     ]
     external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
@@ -588,23 +681,22 @@ def test_variable_delta_is_reprocessed_when_only_its_flag_is_missing(
         2006,
     )
 
-    _run_parse(external_dir, bronze_dir)
+    _run_parse(external_dir, bronze_dir, reference_dir)
 
     columns = set(pd.read_parquet(bronze_path(bronze_dir, "cps", 2006)).columns)
     assert "QINCWAGE" in columns
 
 
 def test_unparseable_delta_ddi_surfaces_rather_than_half_merging(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_ddi_xml, make_fixed_width_dat
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
 ) -> None:
     delta_vars = [
         *_DELTA_MERGE_KEYS,
         ("INCWAGE", "Wage income", 6),
         ("QINCWAGE", "Data quality flag for INCWAGE", 1),
     ]
-    external_dir, bronze_dir, _ = _seed_bronze_and_delta(
+    external_dir, bronze_dir, reference_dir = _seed_bronze_and_delta(
         tmp_path,
-        monkeypatch,
         make_ddi_xml,
         make_fixed_width_dat,
         delta_vars,
@@ -617,4 +709,4 @@ def test_unparseable_delta_ddi_surfaces_rather_than_half_merging(
     # codebook to read the fixed-width data at all - so an unreadable DDI
     # fails loudly instead of quietly writing a year with missing columns.
     with pytest.raises(Exception):
-        _run_parse(external_dir, bronze_dir)
+        _run_parse(external_dir, bronze_dir, reference_dir)
