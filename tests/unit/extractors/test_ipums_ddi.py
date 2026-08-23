@@ -10,12 +10,15 @@ directions.
 from pathlib import Path
 
 import pytest
+import structlog.testing
 from ipumspy import readers
 
 from src.extractors.base import build_extraction_record
 from src.extractors.ipums_ddi import (
     FLAG_PARSER_VERSION,
     collection_flag_registry,
+    flag_columns_for,
+    merge_column_names,
     parse_flag_label,
     summarize_ddi,
     summary_from_metadata,
@@ -225,6 +228,68 @@ def test_summarize_ddi_raises_for_stub_codebook(tmp_path: Path) -> None:
         summarize_ddi(stub)
 
 
+# --- deriving column lists --------------------------------------------------
+
+
+def test_flag_columns_for_includes_shared_flag_when_one_source_requested(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    assert flag_columns_for(summary, ["WKSWORK1"]) == ("QWKSWORK", "QWKSWORKTEST")
+
+
+def test_flag_columns_for_excludes_topcode_when_disabled(
+    tmp_path: Path, make_ddi_xml, cps_flag_vars
+) -> None:
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, cps_flag_vars))
+
+    with_topcode = flag_columns_for(summary, ["INCLONGJ"], include_topcode=True)
+    without = flag_columns_for(summary, ["INCLONGJ"], include_topcode=False)
+
+    assert with_topcode == ("QINCLONG", "QINCLONGD", "TINCLONGJ")
+    assert without == ("QINCLONG", "QINCLONGD")
+
+
+def test_merge_column_names_adds_flags_and_drops_technical_columns(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("YEAR", "Survey year", 4),
+        ("ASECWT", "ASEC weight", 5),
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    columns = merge_column_names(summary, ["INCWAGE"])
+
+    assert columns == ["INCWAGE", "QINCWAGE"]
+    # The preselected technical/weight columns must stay out: bronze already
+    # has them and merge_variables_into_bronze drops them for that reason.
+    assert "YEAR" not in columns
+    assert "ASECWT" not in columns
+
+
+def test_merge_column_names_falls_back_to_requested_when_summary_is_none() -> None:
+    assert merge_column_names(None, ["AGE", "SEX"]) == ["AGE", "SEX"]
+
+
+def test_merge_column_names_does_not_duplicate_a_requested_flag(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    variables = [
+        ("INCWAGE", "Wage income", 7),
+        ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+    ]
+    summary = summarize_ddi(_write_ddi(tmp_path, make_ddi_xml, variables))
+
+    assert merge_column_names(summary, ["INCWAGE", "QINCWAGE"]) == [
+        "INCWAGE",
+        "QINCWAGE",
+    ]
+
+
 # --- rebuilding a summary from a manifest entry ----------------------------
 
 
@@ -369,6 +434,65 @@ def test_collection_flag_registry_rederives_when_parser_version_is_stale(
     assert registry.sources_of("QINCWAGE") == ("INCWAGE",)
 
 
+def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_gone(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """Last tier of resolution: the stamp says the map is old, but the codebook
+    it would be re-derived from no longer exists. A possibly-outdated answer
+    beats "not a flag", which costs a rejected API round trip - and the entry
+    beside it must not mask the loss either, so this directory has two.
+    """
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    good_ddi = _write_ddi(
+        collection_dir, make_ddi_xml, [("AGE", "Age", 2)], name="cps_00001"
+    )
+    _seed_manifest(
+        collection_dir,
+        good_ddi,
+        "cps_00001",
+        {"delivered_variables": ["AGE"], "quality_flags": {}, "topcode_flags": {}},
+    )
+    gone_ddi = _write_ddi(
+        collection_dir, make_ddi_xml, [("INCWAGE", "Wage income", 7)], name="cps_00002"
+    )
+    _seed_manifest(
+        collection_dir,
+        gone_ddi,
+        "cps_00002",
+        {
+            "flag_parser_version": FLAG_PARSER_VERSION - 1,
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        },
+    )
+    gone_ddi.unlink()
+
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+    assert [entry["event"] for entry in logs if "stale" in entry["event"]] == [
+        "ipums_flag_map_stale_but_used"
+    ]
+
+
+def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
+    metadata = {
+        "ddi_path": "/tmp/cps_00001.xml",
+        "flag_parser_version": FLAG_PARSER_VERSION - 1,
+        "delivered_variables": ["INCWAGE", "QINCWAGE"],
+        "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+        "topcode_flags": {},
+    }
+
+    assert summary_from_metadata(metadata) is None
+    stale = summary_from_metadata(metadata, require_current_parser=False)
+    assert stale is not None
+    assert stale.quality_flags == {"INCWAGE": ("QINCWAGE",)}
+
+
 def test_collection_flag_registry_backfills_legacy_entry_from_ddi(
     tmp_path: Path, make_ddi_xml
 ) -> None:
@@ -461,3 +585,38 @@ def test_collection_flag_registry_accepts_preread_entries(
 
     assert registry.kind_of("QINCWAGE") == "quality"
     assert registry.sources_of("QINCWAGE") == ("INCWAGE",)
+
+
+@pytest.mark.parametrize(
+    "manifest_text",
+    [
+        "- extraction_id: cps_00001\n  metadata:\n",  # empty
+        "- extraction_id: cps_00001\n  metadata: not-a-mapping\n",  # scalar
+        "- just-a-string\n",  # non-dict entry
+    ],
+)
+def test_collection_flag_registry_survives_a_malformed_entry(
+    tmp_path: Path, make_ddi_xml, manifest_text: str
+) -> None:
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    (collection_dir / "_MANIFEST.yaml").write_text(manifest_text)
+    _write_ddi(
+        collection_dir,
+        make_ddi_xml,
+        [
+            ("INCWAGE", "Wage income", 7),
+            ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+        ],
+    )
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    # the bad entry is skipped and the loose codebook still answers
+    assert registry.kind_of("QINCWAGE") == "quality"
+    # ...and it is skipped loudly. Warning for the empty and scalar shapes as
+    # well as the non-dict entry is what keeps a corrupted manifest from
+    # looking like an empty one.
+    assert [entry["event"] for entry in logs if "malformed" in entry["event"]] == [
+        "ipums_manifest_entry_malformed"
+    ]

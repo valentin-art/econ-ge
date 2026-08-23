@@ -6,6 +6,7 @@ codebook into a cleaned JSON variable dictionary (mirrors parsers.cps's
 
 import json
 import tempfile
+from collections.abc import Collection
 from pathlib import Path
 
 import pandas as pd
@@ -121,15 +122,30 @@ def build_and_save_variable_dictionary(
     dictionaries_dir: Path,
     years: list[int],
     force: bool = False,
+    variables: Collection[str] | None = None,
 ) -> list[Path]:
     """Build once from the DDI, save (merge) into every year in `years`.
 
     `years` should be the years actually just written/updated in bronze -
     the stems of parse_to_bronze's/merge_variables_into_bronze's own return
     value - ground truth from the data itself, not sample-name parsing.
+
+    `variables` restricts the dictionary to the columns that actually reached
+    bronze. None (the default) keeps every variable in the codebook, which is
+    right for a "new_samples" pull because parse_to_bronze writes the whole
+    file. A "variable_delta" merge keeps only merge_keys + its own columns, so
+    it must pass them here - otherwise the dictionary claims columns bronze
+    does not have, and bronze_coverage (which reads these files as the record
+    of what bronze contains) reports them as already covered and the entry is
+    never reprocessed.
     """
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     variable_dictionary = build_variable_dictionary(ddi_codebook)
+    if variables is not None:
+        keep = set(variables)
+        variable_dictionary = {
+            name: entry for name, entry in variable_dictionary.items() if name in keep
+        }
     return [
         save_variable_dictionary(
             variable_dictionary, dictionaries_dir, year, force=force

@@ -103,12 +103,29 @@ def test_data_structure_defaults_to_none(recording_extractor) -> None:
     assert recording_extractor.calls[0]["data_structure"] is None
 
 
-def test_data_structure_reaches_every_request(recording_extractor) -> None:
+def test_request_can_set_its_own_data_structure(recording_extractor) -> None:
+    # Symmetric with data_quality_flags: a hierarchical pull is a property of
+    # what a collection is for, so it belongs on the request, not the run.
     hierarchical = {"hierarchical": {}}
 
     extract_ipums_extracts(
         _FAKE_API_KEY,
-        extracts=[_request(), _request(description="second")],
+        extracts=[_request(data_structure=hierarchical), _request()],
+    )
+
+    assert [call["data_structure"] for call in recording_extractor.calls] == [
+        hierarchical,
+        None,
+    ]
+
+
+def test_data_structure_reaches_every_request(recording_extractor) -> None:
+    hierarchical = {"hierarchical": {}}
+
+    # the pipeline argument overrides a request that asked for something else
+    extract_ipums_extracts(
+        _FAKE_API_KEY,
+        extracts=[_request(), _request(data_structure={"rectangular": {"on": "H"}})],
         data_structure=hierarchical,
     )
 
