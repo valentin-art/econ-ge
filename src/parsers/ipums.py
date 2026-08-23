@@ -234,6 +234,7 @@ def parse_to_bronze(
     bronze_dir: Path,
     chunksize: int = 100_000,
     replace: bool = False,
+    years: Collection[int] | None = None,
 ) -> list[Path]:
     """Stream-parse one raw IPUMS extract straight to bronze parquet, split by
     YEAR, without ever holding the full extract in memory.
@@ -260,14 +261,17 @@ def parse_to_bronze(
             Rows per streamed chunk.
         replace (bool):
             Allow overwriting a year that already has a bronze file.
+        years (Collection[int] | None):
+            Write only these years. None writes every year in the extract.
 
     Returns:
         list[Path]:
-            The bronze files written, ordered by year.
+            The bronze files written, ordered by year. Empty when `years`
+            selected no year present in the extract.
 
     Raises:
         FileExistsError:
-            A year already has a bronze file and `replace` is False.
+            A selected year already has a bronze file and `replace` is False.
         ValueError:
             The extract holds no rows at all.
         RuntimeError:
@@ -277,6 +281,9 @@ def parse_to_bronze(
     iter_microdata = readers.read_microdata_chunked(
         ddi_codebook, data_path, chunksize=chunksize
     )
+    # `years is not None`, never `if years`: an empty collection means "no
+    # year", and truthiness would silently turn it into "every year".
+    wanted = set(years) if years is not None else None
 
     writers: dict[int, pq.ParquetWriter] = {}
     out_paths: dict[int, tuple[Path, Path]] = {}
@@ -290,6 +297,8 @@ def parse_to_bronze(
             total_rows += len(chunk)
             for year, year_df in chunk.groupby("YEAR"):
                 year = int(year)  # type: ignore[arg-type]
+                if wanted is not None and year not in wanted:
+                    continue
                 table = pa.Table.from_pandas(year_df, preserve_index=False)
                 if year not in writers:
                     out_path = bronze_path(bronze_dir, collection, year)
@@ -328,6 +337,17 @@ def parse_to_bronze(
             tmp_path.unlink(missing_ok=True)
         raise ValueError("IPUMS extract has no rows")
 
+    # An extract that had rows but none for the requested years is a no-op,
+    # not the empty-extract failure above.
+    if not out_paths:
+        log.warning(
+            "ipums_parse_no_years_written",
+            collection=collection,
+            years=sorted(wanted) if wanted is not None else None,
+            data_path=str(data_path),
+        )
+        return []
+
     for year, (tmp_path, out_path) in out_paths.items():
         tmp_path.rename(out_path)
 
@@ -343,6 +363,7 @@ def merge_variables_into_bronze(
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
     chunksize: int = 100_000,
     force: bool = False,
+    years: Collection[int] | None = None,
 ) -> list[Path]:
     """Merge a variable-delta extract (new_variables pulled for samples whose
     other variables are already in bronze) into the existing per-year bronze
@@ -356,16 +377,41 @@ def merge_variables_into_bronze(
     collide with what's already in bronze), left-joins onto the existing
     bronze file for that year, and overwrites it.
 
-    By default an already-present column in `new_variables` is left alone -
-    add_columns only ever adds columns bronze doesn't have yet. With
-    force=True, already-present columns in `new_variables` are instead
-    replaced with the staged extract's values for the rows it covers; every
-    other existing column is untouched.
+    Adds columns and never removes them, so a year merged into ends up wider
+    than the rest rather than reshaped.
 
-    Raises RuntimeError if a staged year has no existing bronze file to merge
-    into - that means the request this delta was planned from doesn't
-    actually correspond to a year already parsed to bronze, which points at
-    a coverage-tracking bug rather than something to silently paper over.
+    Args:
+        data_path (Path):
+            The raw .dat.gz delta extract.
+        ddi_path (Path):
+            Its DDI .xml codebook.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        new_variables (list[str]):
+            The columns this delta contributes.
+        merge_keys (tuple[str, ...]):
+            Columns to join the staged extract onto bronze by.
+        chunksize (int):
+            Rows per streamed chunk while staging.
+        force (bool):
+            Replace values of already-present columns in `new_variables` with
+            the staged extract's, for the rows it covers. Left alone by
+            default, so only columns bronze lacks are added.
+        years (Collection[int] | None):
+            Merge only these years. None merges every year in the extract.
+
+    Returns:
+        list[Path]:
+            The bronze files updated. Empty when `years` selected no year
+            present in the extract.
+
+    Raises:
+        RuntimeError:
+            A staged year has no existing bronze file to merge into, the
+            staged extract shares no merge_keys with bronze, or the merge
+            changed a year's row count.
     """
     with tempfile.TemporaryDirectory() as staging:
         staging_dir = Path(staging)
@@ -378,6 +424,7 @@ def merge_variables_into_bronze(
             # The staging dir is fresh each call, so nothing can collide;
             # stated rather than relied on.
             replace=True,
+            years=years,
         )
 
         updated_paths: list[Path] = []

@@ -928,3 +928,100 @@ def test_parse_to_bronze_replace_overwrites_existing_year(tmp_path: Path) -> Non
 
     assert out_paths == [existing]
     assert bronze_columns_by_year(bronze_dir, "cps") == {2006: {"YEAR", "MONTH", "SEX"}}
+
+
+def test_parse_to_bronze_years_filter_writes_only_requested_years(
+    tmp_path: Path,
+) -> None:
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)  # 2005/2006/2007
+    bronze_dir = tmp_path / "bronze"
+
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[2006])
+
+    assert out_paths == [bronze_path(bronze_dir, "cps", 2006)]
+    assert not bronze_path(bronze_dir, "cps", 2005).exists()
+    assert not bronze_path(bronze_dir, "cps", 2007).exists()
+
+
+def test_parse_to_bronze_years_filter_matching_nothing_returns_empty(
+    tmp_path: Path,
+) -> None:
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+
+    with structlog.testing.capture_logs() as logs:
+        out_paths = parse_to_bronze(
+            data_path, ddi_path, "cps", bronze_dir, years=[1999]
+        )
+
+    assert out_paths == []
+    assert [entry["event"] for entry in logs] == ["ipums_parse_no_years_written"]
+
+
+def test_parse_to_bronze_empty_years_filter_writes_nothing(tmp_path: Path) -> None:
+    # An empty filter means "no year", not "every year" - a truthiness check
+    # here would turn it into a full rebuild.
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+
+    assert parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[]) == []
+    assert not (bronze_dir / "cps").exists()
+
+
+def test_parse_to_bronze_still_raises_on_empty_extract_under_years_filter(
+    tmp_path: Path,
+) -> None:
+    # An extract with no rows stays a failure; only a filtered-out one is a
+    # no-op. The two must not collapse into each other.
+    ddi_path = tmp_path / "cps_00027.xml"
+    ddi_path.write_text(_DDI_XML, encoding="utf-8")
+    data_path = tmp_path / "cps_00027.dat.gz"
+    data_path.write_bytes(gzip.compress(b""))
+
+    with pytest.raises(ValueError, match="no rows"):
+        parse_to_bronze(data_path, ddi_path, "cps", tmp_path / "bronze", years=[2006])
+
+
+def test_merge_variables_into_bronze_years_filter_restricts_touched_years(
+    tmp_path: Path,
+) -> None:
+    # Repairing one year must not re-merge a delta into every other year it
+    # happens to cover.
+    existing_ddi_path = tmp_path / "existing.xml"
+    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    existing_data_path = tmp_path / "existing.dat.gz"
+    existing_data_path.write_bytes(
+        gzip.compress(
+            # YEAR(4) + MONTH(2) + CPSIDP(10) + SEX(1), one row per year.
+            b"20050110000000011\n20060110000000021\n20070110000000031\n"
+        )
+    )
+    bronze_dir = tmp_path / "bronze"
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
+    untouched_before = bronze_path(bronze_dir, "cps", 2005).read_bytes()
+
+    delta_ddi_path = tmp_path / "delta.xml"
+    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "delta.dat.gz"
+    delta_data_path.write_bytes(
+        gzip.compress(
+            # YEAR(4) + MONTH(2) + CPSIDP(10) + RACE(3)
+            b"20050110000000011 00\n20060110000000021 00\n20070110000000031 00\n".replace(
+                b" ", b"1"
+            )
+        )
+    )
+
+    updated = merge_variables_into_bronze(
+        delta_data_path,
+        delta_ddi_path,
+        "cps",
+        bronze_dir,
+        new_variables=["RACE"],
+        years=[2006],
+    )
+
+    assert updated == [bronze_path(bronze_dir, "cps", 2006)]
+    assert "RACE" in bronze_columns_by_year(bronze_dir, "cps")[2006]
+    assert "RACE" not in bronze_columns_by_year(bronze_dir, "cps")[2007]
+    assert bronze_path(bronze_dir, "cps", 2005).read_bytes() == untouched_before
