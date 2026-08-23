@@ -120,6 +120,7 @@ def parse_ipums_extracts(
     external_dir: Path,
     bronze_dir: Path,
     collection: str,
+    dictionaries_dir: Path | None = None,
 ) -> list[Path]:
     """Parse every already-downloaded IPUMS extract not yet reflected in bronze.
 
@@ -132,9 +133,21 @@ def parse_ipums_extracts(
             The path to bronze data that has already been parsed before.
         collection (str):
             The IPUMS collection to parse (e.g. "cps").
-    """
+        dictionaries_dir (Path | None):
 
+    Returns:
+        list[Path]:
+            A list of paths with bronze data for a given collection.
+
+    Raises:
+        RuntimeError:
+            No usable manifest entry for `collection` is backed by files on
+            disk. Nothing is written.
+    """
     log.info("ipums_parse_pipeline_start", collection=collection)
+    if dictionaries_dir is None:
+        dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
+
     bronze_paths: list[Path] = []
     entries = _collection_manifest_entries(external_dir, collection)
     if not entries:
@@ -143,7 +156,6 @@ def parse_ipums_extracts(
             f"{collection!r} in {external_dir / collection} - run "
             f"extract_ipums_extracts first"
         )
-    dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
     coverage = bronze_coverage(dictionaries_dir)
 
     for entry in entries:
