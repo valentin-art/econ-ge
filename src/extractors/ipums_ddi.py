@@ -416,7 +416,8 @@ def merge_column_names(
     if summary is None:
         return list(requested)
     flags = flag_columns_for(summary, requested, include_topcode=include_topcode_flags)
-    return [*requested, *(name for name in flags if name not in set(requested))]
+    requested_set = set(requested)
+    return [*requested, *(name for name in flags if name not in requested_set)]
 
 
 @dataclass(frozen=True)

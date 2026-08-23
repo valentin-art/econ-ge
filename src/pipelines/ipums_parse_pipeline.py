@@ -1,4 +1,4 @@
-"""A module contains pipeline functions for parsing. It takes takes row data,
+"""A module contains pipeline functions for parsing. It takes row data,
 transforms and stores it into bronze-layer parquet files.
 
 Also builds and saves each extract's DDI-derived JSON variable dictionary.
@@ -48,7 +48,7 @@ def _collection_manifest_entries(external_dir: Path, collection: str) -> list[di
         collection (str):
             A collection name.
 
-    Return:
+    Returns:
         list[dict]:
             A list of manifest entries corresponding to raw data for given collection.
     """
@@ -61,6 +61,7 @@ def _collection_manifest_entries(external_dir: Path, collection: str) -> list[di
                 "ipums_manifest_entry_skipped",
                 reason="missing_required_metadata_keys",
                 entry=str(entry)[:200],
+                collection=collection,
             )
             continue
         if not _REQUIRED_ENTRY <= entry.keys():
@@ -68,6 +69,7 @@ def _collection_manifest_entries(external_dir: Path, collection: str) -> list[di
                 "ipums_manifest_entry_skipped",
                 reason="no_file_path",
                 entry=str(entry)[:200],
+                collection=collection,
             )
             continue
         data_path = Path(entry["file_path"])
@@ -103,7 +105,7 @@ def _entry_needs_processing(
         variables (set[str]):
             A set of variables that need to be parsed.
         force (bool):
-            Should the processing be forcely parsed.
+            If true - bypass the coverage check entirely.
 
     Returns:
         bool:
