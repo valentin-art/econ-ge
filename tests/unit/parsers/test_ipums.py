@@ -8,6 +8,7 @@ import structlog.testing
 from ipumspy import readers
 
 from src.parsers.ipums import (
+    bronze_columns_by_year,
     bronze_coverage,
     bronze_path,
     build_and_save_variable_dictionary,
@@ -821,3 +822,74 @@ def test_build_and_save_variable_dictionary_keeps_everything_by_default(
         "INCWAGE",
         "QINCWAGE",
     }
+
+
+def _write_bronze_year(
+    bronze_dir: Path, collection: str, year: int, columns: list[str]
+) -> Path:
+    out_path = bronze_path(bronze_dir, collection, year)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({name: [1] for name in columns}).to_parquet(out_path, index=False)
+    return out_path
+
+
+def test_bronze_columns_by_year_reads_columns_from_parquet_footers(
+    tmp_path: Path,
+) -> None:
+    _write_bronze_year(tmp_path, "cps", 2005, ["YEAR", "AGE", "SEX"])
+    _write_bronze_year(tmp_path, "cps", 2006, ["YEAR", "AGE"])
+
+    assert bronze_columns_by_year(tmp_path, "cps") == {
+        2005: {"YEAR", "AGE", "SEX"},
+        2006: {"YEAR", "AGE"},
+    }
+
+
+def test_bronze_columns_by_year_is_empty_when_collection_has_no_bronze(
+    tmp_path: Path,
+) -> None:
+    assert bronze_columns_by_year(tmp_path, "cps") == {}
+
+
+def test_bronze_columns_by_year_reports_what_the_parquet_holds_not_the_dictionary(
+    tmp_path: Path,
+) -> None:
+    # A dictionary accumulates and never shrinks, so a year whose parquet was
+    # overwritten by a narrower extract still has a wide dictionary. This is
+    # the disagreement that hid the cps2006_09s overwrite.
+    bronze_dir = tmp_path / "bronze"
+    dictionaries_dir = tmp_path / "reference"
+    _write_bronze_year(bronze_dir, "cps", 2006, ["YEAR", "AGE"])
+    save_variable_dictionary(
+        {name: {"Description": name} for name in ("YEAR", "AGE", "SEX", "EDUC")},
+        dictionaries_dir,
+        2006,
+    )
+
+    assert bronze_columns_by_year(bronze_dir, "cps") == {2006: {"YEAR", "AGE"}}
+    assert bronze_coverage(dictionaries_dir) == {
+        2006: {"YEAR", "AGE", "SEX", "EDUC"},
+    }
+
+
+def test_bronze_columns_by_year_skips_and_logs_non_year_parquets(
+    tmp_path: Path,
+) -> None:
+    _write_bronze_year(tmp_path, "cps", 2006, ["YEAR", "AGE"])
+    _write_bronze_year(tmp_path, "cps", 2005, ["YEAR"]).rename(
+        bronze_path(tmp_path, "cps", 2005).with_suffix(".tmp.parquet")
+    )
+    (tmp_path / "cps" / "junk.parquet").write_bytes(
+        (tmp_path / "cps" / "2006.parquet").read_bytes()
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        columns_by_year = bronze_columns_by_year(tmp_path, "cps")
+
+    assert columns_by_year == {2006: {"YEAR", "AGE"}}
+    reasons = {
+        entry["reason"]
+        for entry in logs
+        if entry["event"] == "ipums_bronze_parquet_skipped"
+    }
+    assert reasons == {"leftover_tmp_file", "non_year_filename"}

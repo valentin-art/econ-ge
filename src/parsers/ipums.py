@@ -16,7 +16,7 @@ import structlog
 from ipumspy import readers
 from ipumspy.ddi import Codebook
 
-from src.input_output.parquet import write_parquet
+from src.input_output.parquet import read_parquet_columns, write_parquet
 from src.schemas.bronze.ipums_long import (
     check_no_duplicate_columns,
     validate_ipums_long,
@@ -154,16 +154,51 @@ def build_and_save_variable_dictionary(
     ]
 
 
-def bronze_coverage(dictionaries_dir: Path) -> dict[int, set[str]]:
-    """{year: set(variable_names)} already reflected in bronze, read straight
-    off dictionaries_dir/*.json's top-level keys.
+def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[str]]:
+    """{year: set(column_names)} read from each {bronze_dir}/{collection}/
+    {year}.parquet footer, without loading any row data.
 
-    This is the "reference dir as source of truth for what's in bronze"
-    check: a year's dictionary file is only ever written/updated at the same
-    time parse_to_bronze/merge_variables_into_bronze touch that year, so its
-    keys are exactly the columns bronze has for that year. Non-numeric
-    filenames (e.g. leftover legacy {collection}_{extract_id}.json files)
-    are ignored.
+    A filename that is not a year is warned about and skipped, so one stray
+    file does not hide the rest.
+
+    Args:
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+
+    Returns:
+        dict[int, set[str]]:
+            Columns present per year, empty if no bronze parquet exists yet.
+    """
+    columns_by_year: dict[int, set[str]] = {}
+    for parquet_path in sorted((bronze_dir / collection).glob("*.parquet")):
+        try:
+            year = int(parquet_path.stem)
+        except ValueError:
+            # A leftover .tmp.parquet means a previous run died mid-write, so
+            # it is worth naming rather than passing over in silence.
+            log.warning(
+                "ipums_bronze_parquet_skipped",
+                reason=(
+                    "leftover_tmp_file"
+                    if parquet_path.name.endswith(".tmp.parquet")
+                    else "non_year_filename"
+                ),
+                path=str(parquet_path),
+                collection=collection,
+            )
+            continue
+        columns_by_year[year] = set(read_parquet_columns(parquet_path))
+    return columns_by_year
+
+
+def bronze_coverage(dictionaries_dir: Path) -> dict[int, set[str]]:
+    """{year: set(variable_names)} read from dictionaries_dir/*.json's
+    top-level keys - every variable documented for that year so far.
+
+    Non-numeric filenames (e.g. leftover legacy {collection}_{extract_id}.json
+    files) are ignored.
     """
     coverage: dict[int, set[str]] = {}
     for json_path in dictionaries_dir.glob("*.json"):

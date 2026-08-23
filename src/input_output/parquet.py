@@ -3,6 +3,13 @@
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
+
+
+def read_parquet_columns(path: Path) -> tuple[str, ...]:
+    """Column names from a Parquet footer, without reading any row data."""
+    with pq.ParquetFile(path) as parquet_file:
+        return tuple(parquet_file.schema_arrow.names)
 
 
 def read_parquet(path: Path) -> pd.DataFrame:
