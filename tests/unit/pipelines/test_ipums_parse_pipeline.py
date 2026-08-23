@@ -441,9 +441,13 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
     calls: list[tuple] = []
 
     def fake_parse_to_bronze(
-        data_path: Path, ddi_path: Path, collection: str, bronze_dir: Path
+        data_path: Path,
+        ddi_path: Path,
+        collection: str,
+        bronze_dir: Path,
+        replace: bool = False,
     ):
-        calls.append((data_path, ddi_path, collection, bronze_dir))
+        calls.append((data_path, ddi_path, collection, bronze_dir, replace))
         return [bronze_path(bronze_dir, collection, 2006)]
 
     monkeypatch.setattr(
@@ -457,7 +461,9 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
         dictionaries_dir=reference_dir,
     )
 
-    assert calls == [(data_path, ddi_path, "cps", bronze_dir)]
+    # replace is part of the call contract now: whether this call may
+    # overwrite a year is decided here, not inside parse_to_bronze.
+    assert calls == [(data_path, ddi_path, "cps", bronze_dir, True)]
 
 
 # --- Data quality flags reaching bronze -------------------------------------

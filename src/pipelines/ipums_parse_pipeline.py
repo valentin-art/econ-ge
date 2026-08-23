@@ -211,7 +211,12 @@ def parse_ipums_extracts(
                 force=force,
             )
         else:
-            touched_paths = parse_to_bronze(data_path, ddi_path, collection, bronze_dir)
+            # Explicitly wholesale, matching what this call has always done:
+            # parse_to_bronze rewrites every year the extract covers, including
+            # years already in bronze.
+            touched_paths = parse_to_bronze(
+                data_path, ddi_path, collection, bronze_dir, replace=True
+            )
         bronze_paths.extend(touched_paths)
         log.info(
             "ipums_parse_entry_complete",

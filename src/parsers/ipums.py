@@ -233,6 +233,7 @@ def parse_to_bronze(
     collection: str,
     bronze_dir: Path,
     chunksize: int = 100_000,
+    replace: bool = False,
 ) -> list[Path]:
     """Stream-parse one raw IPUMS extract straight to bronze parquet, split by
     YEAR, without ever holding the full extract in memory.
@@ -241,6 +242,36 @@ def parse_to_bronze(
     across several non-contiguous chunks, so a ParquetWriter is opened
     lazily per year on first sight of that year and kept open (accumulating
     row groups) until every chunk has been processed.
+
+    Each year is written whole, so an extract covering a year that already
+    has a bronze file replaces every column that year had. `replace` is the
+    consent for that.
+
+    Args:
+        data_path (Path):
+            The raw .dat.gz extract.
+        ddi_path (Path):
+            Its DDI .xml codebook.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        chunksize (int):
+            Rows per streamed chunk.
+        replace (bool):
+            Allow overwriting a year that already has a bronze file.
+
+    Returns:
+        list[Path]:
+            The bronze files written, ordered by year.
+
+    Raises:
+        FileExistsError:
+            A year already has a bronze file and `replace` is False.
+        ValueError:
+            The extract holds no rows at all.
+        RuntimeError:
+            A ParquetWriter could not be closed.
     """
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     iter_microdata = readers.read_microdata_chunked(
@@ -262,6 +293,11 @@ def parse_to_bronze(
                 table = pa.Table.from_pandas(year_df, preserve_index=False)
                 if year not in writers:
                     out_path = bronze_path(bronze_dir, collection, year)
+                    if out_path.exists() and not replace:
+                        raise FileExistsError(
+                            f"Bronze file {out_path} already exists for year "
+                            f"{year} - pass replace=True to overwrite it wholesale"
+                        )
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     tmp_path = out_path.with_suffix(".tmp.parquet")
                     writers[year] = pq.ParquetWriter(tmp_path, table.schema)
@@ -339,6 +375,9 @@ def merge_variables_into_bronze(
             collection,
             bronze_dir=staging_dir,
             chunksize=chunksize,
+            # The staging dir is fresh each call, so nothing can collide;
+            # stated rather than relied on.
+            replace=True,
         )
 
         updated_paths: list[Path] = []

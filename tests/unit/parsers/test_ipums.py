@@ -288,7 +288,12 @@ def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
 
     monkeypatch.setattr(ipums_mod, "check_no_duplicate_columns", flaky)
     with pytest.raises(ValueError, match="boom"):
-        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=2)
+        # replace=True so the run gets far enough to fail mid-stream: even
+        # with overwriting permitted, a year is only ever replaced by a
+        # complete rewrite.
+        parse_to_bronze(
+            data_path, ddi_path, "cps", bronze_dir, chunksize=2, replace=True
+        )
 
     assert good_path.read_bytes() == before
     assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
@@ -894,3 +899,32 @@ def test_bronze_columns_by_year_skips_and_logs_non_year_parquets(
         if entry["event"] == "ipums_bronze_parquet_skipped"
     }
     assert reasons == {"leftover_tmp_file", "non_year_filename"}
+
+
+def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:
+    # The cps2006_09s regression: a new_samples extract landing on a year that
+    # already has bronze used to overwrite every column that year held.
+    data_path, ddi_path = _write_fixture(tmp_path)  # 2006 only
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    with pytest.raises(FileExistsError, match="replace=True"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
+
+    assert existing.read_bytes() == b"existing-bronze"
+    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
+
+
+def test_parse_to_bronze_replace_overwrites_existing_year(tmp_path: Path) -> None:
+    data_path, ddi_path = _write_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, replace=True)
+
+    assert out_paths == [existing]
+    assert bronze_columns_by_year(bronze_dir, "cps") == {2006: {"YEAR", "MONTH", "SEX"}}
