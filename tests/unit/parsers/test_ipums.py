@@ -767,3 +767,57 @@ def test_bronze_coverage_ignores_non_year_filenames(tmp_path: Path) -> None:
     coverage = bronze_coverage(tmp_path)
 
     assert coverage == {2006: {"AGE"}}
+
+
+def test_build_and_save_variable_dictionary_filters_to_given_variables(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A variable_delta merge writes only its own columns to bronze, so the
+    # dictionary must not claim the rest of the codebook - bronze_coverage
+    # reads these files as the record of what bronze actually holds.
+    ddi_path = tmp_path / "cps_00001.xml"
+    ddi_path.write_text(
+        make_ddi_xml(
+            [
+                ("YEAR", "Survey year", 4),
+                ("ASECWT", "ASEC weight", 5),
+                ("INCWAGE", "Wage income", 7),
+                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dictionaries_dir = tmp_path / "reference"
+
+    build_and_save_variable_dictionary(
+        ddi_path, dictionaries_dir, [2006], variables=["INCWAGE", "QINCWAGE"]
+    )
+
+    dictionary = load_variable_dictionary(dictionaries_dir, 2006)
+    assert set(dictionary) == {"INCWAGE", "QINCWAGE"}
+
+
+def test_build_and_save_variable_dictionary_keeps_everything_by_default(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A new_samples pull writes the whole file, so the whole codebook is right.
+    ddi_path = tmp_path / "cps_00001.xml"
+    ddi_path.write_text(
+        make_ddi_xml(
+            [
+                ("YEAR", "Survey year", 4),
+                ("INCWAGE", "Wage income", 7),
+                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dictionaries_dir = tmp_path / "reference"
+
+    build_and_save_variable_dictionary(ddi_path, dictionaries_dir, [2006])
+
+    assert set(load_variable_dictionary(dictionaries_dir, 2006)) == {
+        "YEAR",
+        "INCWAGE",
+        "QINCWAGE",
+    }
