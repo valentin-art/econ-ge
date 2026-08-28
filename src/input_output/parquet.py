@@ -23,11 +23,21 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
     """
     try:
         with pq.ParquetFile(path) as parquet_file:
-            names = parquet_file.schema_arrow.names
+            schema = parquet_file.schema_arrow
+            index_columns = (
+                set(schema.pandas_metadata["index_columns"])
+                if schema.pandas_metadata
+                else set()
+            )
+            names = schema.names
+    except FileNotFoundError:
+        raise
     except (pa.ArrowInvalid, OSError) as exc:
-        raise ParquetUnreadableError(path) from exc
+        raise ParquetUnreadableError(
+            f"Could not read the Parquet footer of {path}"
+        ) from exc
 
-    return tuple(name for name in names if not name.startswith("__index_level_"))
+    return tuple(name for name in names if name not in index_columns)
 
 
 def read_parquet(path: Path) -> pd.DataFrame:
