@@ -167,7 +167,6 @@ def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[s
     corrupt file does not hide the rest. An absent year is therefore
     "unknown", not "has no columns".
 
-
     Args:
         bronze_dir (Path):
             The bronze root; the collection directory is appended.
@@ -177,6 +176,9 @@ def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[s
     Returns:
         dict[int, set[str]]:
             Columns present per year, empty if no bronze parquet exists yet.
+
+    Raises:
+        ParquetUnreadableError: Parquet file is currupted and unreadable.
     """
     columns_by_year: dict[int, set[str]] = {}
     for parquet_path in sorted((bronze_dir / collection).glob("*.parquet")):

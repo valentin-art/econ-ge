@@ -1,4 +1,4 @@
-"""Thin write adapter for pipeline output tables. No business logic."""
+"""Thin read/write adapter for pipeline output tables. No business logic."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 
 
 class ParquetUnreadableError(Exception):
-    "A parquet file exists but its footer could not be parsed."
+    """A parquet file exists but its footer could not be parsed."""
 
 
 def read_parquet_columns(path: Path) -> tuple[str, ...]:
@@ -24,11 +24,11 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
     try:
         with pq.ParquetFile(path) as parquet_file:
             schema = parquet_file.schema_arrow
-            index_columns = (
-                set(schema.pandas_metadata["index_columns"])
-                if schema.pandas_metadata
-                else set()
-            )
+            index_columns = {
+                name
+                for name in (schema.pandas_metadata or {}).get("index_columns", ())
+                if isinstance(name, str)
+            }
             names = schema.names
     except FileNotFoundError:
         raise
@@ -41,9 +41,13 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
 
 
 def read_parquet(path: Path) -> pd.DataFrame:
-    """Read a Parquet file into a DataFrame."""
+    """Read a Parquet file into a DataFrame.
+
+    Raises:
+        FileNotFoundError: No file in `path`.
+    """
     if not path.exists():
-        raise ValueError(f"File {path} does not exist, returning empty DataFrame")
+        raise FileNotFoundError(f"File {path} does not exist.")
     return pd.read_parquet(path)
 
 

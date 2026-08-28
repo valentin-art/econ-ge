@@ -445,6 +445,7 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
         ddi_path: Path,
         collection: str,
         bronze_dir: Path,
+        *,
         replace: bool = False,
     ):
         calls.append((data_path, ddi_path, collection, bronze_dir, replace))
@@ -718,7 +719,7 @@ def test_unparseable_delta_ddi_surfaces_rather_than_half_merging(
         _run_parse(external_dir, bronze_dir, reference_dir)
 
 
-def test_wholesale_reparse_parns_when_year_loses_col(tmp_path: Path) -> None:
+def test_wholesale_reparse_warns_when_a_year_loses_columns(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
@@ -748,12 +749,8 @@ def test_wholesale_reparse_parns_when_year_loses_col(tmp_path: Path) -> None:
             file_path=narrow_data,
             metadata={
                 "collection": "cps",
-                "samples": {
-                    "cps2006_09s",
-                },
-                "variables": {
-                    "AGE",
-                },
+                "samples": ("cps2006_09s",),
+                "variables": ("AGE",),
                 "ddi_path": str(narrow_ddi_path),
                 "extract_id": 2,
                 "request_kind": "new_samples",

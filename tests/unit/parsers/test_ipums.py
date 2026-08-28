@@ -922,6 +922,13 @@ def test_bronze_columns_by_year_skips_and_logs_unreadable_parquet(
     assert reasons == {"unreadable_parquet"}
 
 
+def test_bronze_columns_by_year_survives_a_pandas_index_file(tmp_path: Path) -> None:
+    _write_bronze_year(tmp_path, "cps", 2005, ["YEAR", "SEX"])
+    pd.DataFrame({"YEAR": [2006]}).to_parquet(bronze_path(tmp_path, "cps", 2006))
+
+    assert set(bronze_columns_by_year(tmp_path, "cps")) == {2005, 2006}
+
+
 def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:
     # The cps2006_09s regression: a new_samples extract landing on a year that
     # already has bronze used to overwrite every column that year held.
@@ -1003,7 +1010,7 @@ def test_parse_to_bronze_still_raises_on_empty_extract_under_years_filter(
         parse_to_bronze(data_path, ddi_path, "cps", tmp_path / "bronze", years=[2006])
 
 
-def test_parse_to_bronze_guard_leavs_other_years_unwritten(tmp_path: Path) -> None:
+def test_parse_to_bronze_guard_leaves_other_years_unwritten(tmp_path: Path) -> None:
     # All-or-nothing: a collision on one year must not leave the extract's other years half-landed in bronze
     data_path, ddi_path = _write_multi_year_fixture(tmp_path)
     bronze_dir = tmp_path / "bronze"
