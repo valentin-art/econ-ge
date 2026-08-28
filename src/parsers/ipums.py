@@ -16,7 +16,11 @@ import structlog
 from ipumspy import readers
 from ipumspy.ddi import Codebook
 
-from src.input_output.parquet import read_parquet_columns, write_parquet
+from src.input_output.parquet import (
+    ParquetUnreadableError,
+    read_parquet_columns,
+    write_parquet,
+)
 from src.schemas.bronze.ipums_long import (
     check_no_duplicate_columns,
     validate_ipums_long,
@@ -189,7 +193,16 @@ def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[s
                 collection=collection,
             )
             continue
-        columns_by_year[year] = set(read_parquet_columns(parquet_path))
+        try:
+            columns_by_year[year] = set(read_parquet_columns(parquet_path))
+        except ParquetUnreadableError:
+            log.warning(
+                "ipums_bronze_parquet_skipped",
+                reason="unreadable_parquet",
+                path=str(parquet_path),
+                collection=collection,
+                exc_info=True,
+            )
     return columns_by_year
 
 

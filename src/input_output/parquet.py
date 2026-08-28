@@ -3,13 +3,31 @@
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 
+class ParquetUnreadableError(Exception):
+    "A parquet file exists by its footer could not be parsed."
+
+
 def read_parquet_columns(path: Path) -> tuple[str, ...]:
-    """Column names from a Parquet footer, without reading any row data."""
-    with pq.ParquetFile(path) as parquet_file:
-        return tuple(parquet_file.schema_arrow.names)
+    """Column names from a Parquet footer, without reading any row data.
+
+    Pandas index fields are excluded, so this is the table's columns as
+    written rather than materialized.
+
+    Raises:
+        ParquetUnreadableError:
+            The file is truncated or is not Parquet.
+    """
+    try:
+        with pq.ParquetFile(path) as parquet_file:
+            names = parquet_file.schema_arrow.names
+    except (pa.ArrowInvalid, OSError) as exc:
+        raise ParquetUnreadableError(path) from exc
+
+    return tuple(name for name in names if not name.startswith("__index_level_"))
 
 
 def read_parquet(path: Path) -> pd.DataFrame:

@@ -901,6 +901,26 @@ def test_bronze_columns_by_year_skips_and_logs_non_year_parquets(
     assert reasons == {"leftover_tmp_file", "non_year_filename"}
 
 
+def test_bronze_columns_by_year_skips_and_logs_unreachable_parquet(
+    tmp_path: Path,
+) -> None:
+    _write_bronze_year(tmp_path, "cps", 2005, ["YEAR", "SEX"])
+    _write_bronze_year(tmp_path, "cps", 2007, ["YEAR", "AGE"])
+    (tmp_path / "cps" / "2006.parquet").write_bytes(b"not a parquet file")
+
+    with structlog.testing.capture_logs() as logs:
+        columns_by_year = bronze_columns_by_year(tmp_path, "cps")
+
+    # The unreadable year is left out rather than taking down the other years
+    assert columns_by_year == {2005: {"YEAR", "SEX"}, 2007: {"YEAR", "AGE"}}
+    reasons = {
+        entry["reason"]
+        for entry in logs
+        if entry["event"] == "ipums_bronze_parquet_skipped"
+    }
+    assert reasons == {"unreadable_parquet"}
+
+
 def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:
     # The cps2006_09s regression: a new_samples extract landing on a year that
     # already has bronze used to overwrite every column that year held.
