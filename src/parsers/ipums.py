@@ -162,8 +162,11 @@ def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[s
     """{year: set(column_names)} read from each {bronze_dir}/{collection}/
     {year}.parquet footer, without loading any row data.
 
-    A filename that is not a year is warned about and skipped, so one stray
-    file does not hide the rest.
+    A filename that is not a year, or a file whose Parquet footer will not
+    parse, is warned about and left out of the result, so one stray or
+    corrupt file does not hide the rest. An absent year is therefore
+    "unknown", not "has no columns".
+
 
     Args:
         bronze_dir (Path):

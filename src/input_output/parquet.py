@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 
 
 class ParquetUnreadableError(Exception):
-    "A parquet file exists by its footer could not be parsed."
+    "A parquet file exists but its footer could not be parsed."
 
 
 def read_parquet_columns(path: Path) -> tuple[str, ...]:
@@ -41,7 +41,7 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
 
 
 def read_parquet(path: Path) -> pd.DataFrame:
-    """Read a Parquet file into a DataFrame, returning an empty DataFrame if the file doesn't exist."""
+    """Read a Parquet file into a DataFrame."""
     if not path.exists():
         raise ValueError(f"File {path} does not exist, returning empty DataFrame")
     return pd.read_parquet(path)

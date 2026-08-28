@@ -221,7 +221,6 @@ def parse_ipums_extracts(
             )
             after_columns = bronze_columns_by_year(bronze_dir, collection)
 
-            # go through parsed years (identified by paths)
             for year in sorted(int(p.stem) for p in touched_paths):
                 lost = before_columns.get(year, set()) - after_columns.get(year, set())
                 if lost:

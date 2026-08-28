@@ -902,7 +902,7 @@ def test_bronze_columns_by_year_skips_and_logs_non_year_parquets(
     assert reasons == {"leftover_tmp_file", "non_year_filename"}
 
 
-def test_bronze_columns_by_year_skips_and_logs_unreachable_parquet(
+def test_bronze_columns_by_year_skips_and_logs_unreadable_parquet(
     tmp_path: Path,
 ) -> None:
     _write_bronze_year(tmp_path, "cps", 2005, ["YEAR", "SEX"])
