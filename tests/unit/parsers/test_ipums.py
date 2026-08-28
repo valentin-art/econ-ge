@@ -923,10 +923,16 @@ def test_bronze_columns_by_year_skips_and_logs_unreadable_parquet(
 
 
 def test_bronze_columns_by_year_survives_a_pandas_index_file(tmp_path: Path) -> None:
+    # A bronze file written by a notebook or repair script carries pandas index
+    # metadata: it must neither crash the scan nor add a phantom column.
     _write_bronze_year(tmp_path, "cps", 2005, ["YEAR", "SEX"])
     pd.DataFrame({"YEAR": [2006]}).to_parquet(bronze_path(tmp_path, "cps", 2006))
 
-    assert set(bronze_columns_by_year(tmp_path, "cps")) == {2005, 2006}
+    columns = bronze_columns_by_year(tmp_path, "cps")
+
+    assert set(columns) == {2005, 2006}
+    assert columns[2006] == {"YEAR"}
+    assert columns[2005] == {"YEAR", "SEX"}
 
 
 def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:

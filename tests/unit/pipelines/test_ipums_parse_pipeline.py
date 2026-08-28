@@ -725,7 +725,7 @@ def test_wholesale_reparse_warns_when_a_year_loses_columns(tmp_path: Path) -> No
     bronze_dir = data_root / "bronze" / "ipums"
     collection_dir = external_dir / "cps"
 
-    # Bronze alread holds 2006 with SEX, from an earlier wide extract
+    # Bronze already holds 2006 with SEX, from an earlier wide extract
     wide_ddi = _DDI_TEMPLATE.format(
         filename="wide.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR + _SEX_VAR
     )
