@@ -43,3 +43,12 @@ def test_read_parquet_columns_raises_on_missing_file(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError):
         read_parquet_columns(path)
+
+
+def test_read_parquet_columns_handles_a_range_index(tmp_path: Path) -> None:
+    # pandas records a RangeIndex as a descriptor dict, not a column name -
+    # it must be ignored, not fed to set().
+    path = tmp_path / "range.parquet"
+    pd.DataFrame({"YEAR": [2006, 2007]}).to_parquet(path)  # index=True default
+
+    assert read_parquet_columns(path) == ("YEAR",)
