@@ -43,7 +43,7 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
 def read_parquet(path: Path) -> pd.DataFrame:
     """Read a Parquet file into a DataFrame, returning an empty DataFrame if the file doesn't exist."""
     if not path.exists():
-        ValueError(f"File {path} does not exist, returning empty DataFrame")
+        raise ValueError(f"File {path} does not exist, returning empty DataFrame")
     return pd.read_parquet(path)
 
 

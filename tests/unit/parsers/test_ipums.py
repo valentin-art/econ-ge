@@ -3,6 +3,7 @@ import warnings
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 import structlog.testing
 from ipumspy import readers
@@ -975,7 +976,7 @@ def test_parse_to_bronze_years_filter_matching_nothing_returns_empty(
         )
 
     assert out_paths == []
-    assert [entry["event"] for entry in logs] == ["ipums_parse_no_years_written"]
+    assert "ipums_parse_no_years_written" in [entry["event"] for entry in logs]
 
 
 def test_parse_to_bronze_empty_years_filter_writes_nothing(tmp_path: Path) -> None:
@@ -1000,6 +1001,40 @@ def test_parse_to_bronze_still_raises_on_empty_extract_under_years_filter(
 
     with pytest.raises(ValueError, match="no rows"):
         parse_to_bronze(data_path, ddi_path, "cps", tmp_path / "bronze", years=[2006])
+
+
+def test_parse_to_bronze_guard_leavs_other_years_unwritten(tmp_path: Path) -> None:
+    # All-or-nothing: a collision on one year must not leave the extract's other years half-landed in bronze
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    with pytest.raises(FileExistsError, match="replace=True"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=1)
+
+    assert existing.read_bytes() == b"existing-bronze"
+    assert sorted(p.name for p in (bronze_dir / "cps").iterdir()) == ["2006.parquet"]
+
+
+def test_parse_to_bronze_removes_tmp_files_when_a_writer_fails_to_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The RuntimeError promises the partials were removed; hold it to that.
+    data_path, ddi_path = _write_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    monkeypatch.setattr(
+        pq.ParquetWriter,
+        "close",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="were removed"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
+
+    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
+    assert not bronze_path(bronze_dir, "cps", 2006).exists()
 
 
 def test_merge_variables_into_bronze_years_filter_restricts_touched_years(

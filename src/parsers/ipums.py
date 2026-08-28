@@ -375,6 +375,7 @@ def merge_variables_into_bronze(
     new_variables: list[str],
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
     chunksize: int = 100_000,
+    *,
     force: bool = False,
     years: Collection[int] | None = None,
 ) -> list[Path]:
