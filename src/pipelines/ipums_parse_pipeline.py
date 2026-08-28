@@ -23,7 +23,7 @@ from src.parsers.ipums import (
     merge_variables_into_bronze,
     parse_to_bronze,
 )
-from src.schemas.bronze.ipums_long import modal_columns
+from src.schemas.bronze.ipums_long import bronze_column_deviations, modal_columns
 
 log = structlog.get_logger(__name__)
 
@@ -177,6 +177,7 @@ def parse_ipums_extracts(
     collection: str,
     dictionaries_dir: Path | None = None,
     replace: bool = False,
+    years: Collection[int] | None = None,
     expected_columns: Collection[str] | None = None,
 ) -> list[Path]:
     """Parse every already-downloaded IPUMS extract not yet reflected in bronze.
@@ -198,6 +199,8 @@ def parse_ipums_extracts(
         replace (bool):
             Allow a "new_samples" entry to overwrite a year that already has
             a bronze file.
+        years (Collection[int] | None):
+            Parse only these years. None parses every year the entries cover.
         expected_columns (Collection[str] | None):
             The column set every year is meant to hold, used to refuse an
             entry that would reshape an existing year. None derives it from
@@ -235,6 +238,7 @@ def parse_ipums_extracts(
         if expected_columns is not None
         else modal_columns(coverage)
     )
+    years_filter = set(years) if years is not None else None
 
     for entry in entries:
         metadata = entry["metadata"]
@@ -265,6 +269,20 @@ def parse_ipums_extracts(
             if (year := parse_sample_year(sample)) is not None
         }
 
+        # Narrow before the coverage check, so a filtered run judges the
+        # entry only on the years it is allowed to touch. An entry with no
+        # parseable year keeps an empty set and stays fail-safe below.
+        if years_filter is not None and sample_years:
+            sample_years &= years_filter
+            if not sample_years:
+                log.info(
+                    "ipums_parse_entry_skipped",
+                    collection=collection,
+                    extract_id=extract_id,
+                    reason="outside_years_filter",
+                )
+                continue
+
         force = metadata.get("force", False)
         if not _entry_needs_processing(coverage, sample_years, variables, force=force):
             log.info(
@@ -284,6 +302,7 @@ def parse_ipums_extracts(
                 bronze_dir,
                 new_variables=entry_columns,
                 force=force,
+                years=years_filter,
             )
         else:
             existing_years = sample_years & set(coverage)
@@ -310,6 +329,7 @@ def parse_ipums_extracts(
                 collection,
                 bronze_dir,
                 replace=replace,
+                years=years_filter,
             )
         bronze_paths.extend(touched_paths)
         log.info(
@@ -341,5 +361,20 @@ def parse_ipums_extracts(
                 # columns the rewrite dropped would never come back.
                 coverage[year] = set(variables)
 
-    log.info("ipums_parse_pipeline_complete", n_bronze_paths=len(bronze_paths))
+    deviations = bronze_column_deviations(
+        bronze_columns_by_year(bronze_dir, collection), expected
+    )
+    for year, (missing, extra) in deviations.items():
+        log.warning(
+            "ipums_bronze_column_deviation",
+            collection=collection,
+            year=year,
+            missing=list(missing),
+            extra=list(extra),
+        )
+    log.info(
+        "ipums_parse_pipeline_complete",
+        n_bronze_paths=len(bronze_paths),
+        n_deviating_years=len(deviations),
+    )
     return bronze_paths

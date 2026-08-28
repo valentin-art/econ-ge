@@ -939,3 +939,54 @@ def test_coverage_comes_from_bronze_parquet_not_the_dictionary(
         log for log in logs if log["event"] == "ipums_parse_entry_already_covered"
     ]
     assert set(pd.read_parquet(narrow).columns) == {"YEAR", "AGE", "SEX"}
+
+
+def test_years_filter_skips_entries_that_do_not_intersect_it(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+        ("AGE",),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=reference_dir,
+            years=[1999],
+        )
+
+    skipped = [log for log in logs if log["event"] == "ipums_parse_entry_skipped"]
+    assert [log["reason"] for log in skipped] == ["outside_years_filter"]
+
+
+def test_deviating_year_is_reported_after_the_run(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+        ("AGE",),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=reference_dir,
+            expected_columns={"YEAR", "AGE", "SEX", "EDUC"},
+        )
+
+    deviations = [
+        log for log in logs if log["event"] == "ipums_bronze_column_deviation"
+    ]
+    assert [log["year"] for log in deviations] == [2006]
+    assert deviations[0]["missing"] == ["EDUC"]
