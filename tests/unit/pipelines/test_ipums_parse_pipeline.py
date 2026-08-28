@@ -16,8 +16,69 @@ from src.parsers.ipums import (
 )
 from src.pipelines.ipums_parse_pipeline import (
     _entry_needs_processing,
+    _refusal_reason,
     parse_ipums_extracts,
 )
+
+_EXPECTED = frozenset({"YEAR", "AGE", "SEX"})
+
+
+def test_refusal_reason_allows_a_year_that_has_no_bronze_yet() -> None:
+    # Bootstrap: nothing to protect, so the guard stays out of the way even
+    # for an entry whose columns are nothing like the expected set.
+    assert (
+        _refusal_reason(
+            {"YEAR", "WTFINL"}, set(), _EXPECTED, summary_known=True, replace=False
+        )
+        is None
+    )
+
+
+def test_refusal_reason_blocks_overwriting_an_existing_year() -> None:
+    assert (
+        _refusal_reason(
+            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=True, replace=False
+        )
+        == "bronze_year_exists"
+    )
+
+
+def test_refusal_reason_allows_a_conforming_entry_under_replace() -> None:
+    # The repair path: the full extract may rewrite a damaged year because
+    # everything it carries belongs to the expected set.
+    assert (
+        _refusal_reason(
+            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=True, replace=True
+        )
+        is None
+    )
+
+
+def test_refusal_reason_blocks_unexpected_columns_even_under_replace() -> None:
+    # The cps2006_09s rule. Repairing a year needs replace=True, and that
+    # same run still has to refuse the wrong-grain entry that damaged it.
+    assert (
+        _refusal_reason(
+            {"YEAR", "AGE", "WTFINL"},
+            {2006},
+            _EXPECTED,
+            summary_known=True,
+            replace=True,
+        )
+        == "unexpected_columns"
+    )
+
+
+def test_refusal_reason_blocks_an_entry_whose_columns_are_unknown() -> None:
+    # An unreadable DDI leaves the column list as the requested variables,
+    # which omits the flag columns IPUMS adds - so it can look conforming
+    # while carrying anything.
+    assert (
+        _refusal_reason(
+            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=False, replace=True
+        )
+        == "unknown_columns"
+    )
 
 
 def test_needs_processing_when_year_fully_missing() -> None:
@@ -447,8 +508,9 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
         bronze_dir: Path,
         *,
         replace: bool = False,
+        years=None,
     ):
-        calls.append((data_path, ddi_path, collection, bronze_dir, replace))
+        calls.append((data_path, ddi_path, collection, bronze_dir, replace, years))
         return [bronze_path(bronze_dir, collection, 2006)]
 
     monkeypatch.setattr(
@@ -462,9 +524,9 @@ def test_parse_ipums_extracts_calls_parse_to_bronze_with_expected_args(
         dictionaries_dir=reference_dir,
     )
 
-    # replace is part of the call contract now: whether this call may
-    # overwrite a year is decided here, not inside parse_to_bronze.
-    assert calls == [(data_path, ddi_path, "cps", bronze_dir, True)]
+    # The write-guarding kwargs are part of the call contract: defaulting
+    # either of them at the call site is how a year gets overwritten.
+    assert calls == [(data_path, ddi_path, "cps", bronze_dir, False, None)]
 
 
 # --- Data quality flags reaching bronze -------------------------------------
@@ -719,55 +781,161 @@ def test_unparseable_delta_ddi_surfaces_rather_than_half_merging(
         _run_parse(external_dir, bronze_dir, reference_dir)
 
 
-def test_wholesale_reparse_warns_when_a_year_loses_columns(tmp_path: Path) -> None:
+# --- Guarding an existing bronze year ---------------------------------------
+#
+# Bronze is keyed by YEAR, but IPUMS samples are the real grain: cps2006_03s
+# (March ASEC) and cps2006_09s (September Basic Monthly) both land on 2006.
+# A "new_samples" entry is written whole, so the second one to arrive used to
+# replace everything the first had written.
+
+
+def _seed_year_and_pending_entry(
+    tmp_path: Path,
+    make_ddi_xml,
+    make_fixed_width_dat,
+    pending_vars: list[tuple[str, str, int]],
+    pending_requested: tuple[str, ...],
+    bronze_vars: list[tuple[str, str, int]] | None = None,
+) -> tuple[Path, Path, Path]:
+    """A bronze 2006 already written, plus a pending new_samples entry for it."""
     data_root = tmp_path / "data"
     external_dir = data_root / "external" / "ipums"
     bronze_dir = data_root / "bronze" / "ipums"
+    reference_dir = data_root / "reference" / "ipums" / "cps"
     collection_dir = external_dir / "cps"
+    collection_dir.mkdir(parents=True, exist_ok=True)
 
-    # Bronze already holds 2006 with SEX, from an earlier wide extract
-    wide_ddi = _DDI_TEMPLATE.format(
-        filename="wide.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR + _SEX_VAR
+    if bronze_vars is None:
+        bronze_vars = [("YEAR", "Survey year", 4), ("AGE", "Age", 2), ("SEX", "Sex", 1)]
+    (collection_dir / "wide.xml").write_text(
+        make_ddi_xml(bronze_vars), encoding="utf-8"
     )
-    wide_data, wide_ddi_path = _write_extract(
-        collection_dir, "wide", wide_ddi, _FULL_DAT_TEXT
+    (collection_dir / "wide.dat.gz").write_bytes(
+        make_fixed_width_dat([[2006, *[1] * (len(bronze_vars) - 1)]], bronze_vars)
     )
-    parse_to_bronze(wide_data, wide_ddi_path, "cps", bronze_dir)
+    parse_to_bronze(
+        collection_dir / "wide.dat.gz", collection_dir / "wide.xml", "cps", bronze_dir
+    )
 
-    # Incoming new_samples extract covers 2006 but has no SEX
-    narrow_ddi = _DDI_TEMPLATE.format(
-        filename="narrow.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR
+    (collection_dir / "narrow.xml").write_text(
+        make_ddi_xml(pending_vars), encoding="utf-8"
     )
-    narrow_data, narrow_ddi_path = _write_extract(
-        collection_dir, "narrow", narrow_ddi, "20060125\n20060230\n"
+    (collection_dir / "narrow.dat.gz").write_bytes(
+        make_fixed_width_dat([[2006, *[9] * (len(pending_vars) - 1)]], pending_vars)
     )
     append_to_manifest(
         collection_dir,
         build_extraction_record(
             source="ipums_api",
-            extraction_id="cps_00002",
-            file_path=narrow_data,
+            extraction_id="cps_00099",
+            file_path=collection_dir / "narrow.dat.gz",
             metadata={
                 "collection": "cps",
                 "samples": ("cps2006_09s",),
-                "variables": ("AGE",),
-                "ddi_path": str(narrow_ddi_path),
-                "extract_id": 2,
+                "variables": pending_requested,
+                "ddi_path": str(collection_dir / "narrow.xml"),
+                "extract_id": 99,
                 "request_kind": "new_samples",
                 "force": False,
             },
         ),
     )
+    return external_dir, bronze_dir, reference_dir
+
+
+def test_new_samples_entry_refused_when_year_exists_and_replace_is_false(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    # The entry brings SEX, which bronze 2006 lacks, so it is genuinely
+    # pending - and writing it would still replace the whole year.
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2), ("SEX", "Sex", 1)],
+        ("AGE", "SEX"),
+        bronze_vars=[("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+    )
+    before = bronze_path(bronze_dir, "cps", 2006).read_bytes()
 
     with structlog.testing.capture_logs() as logs:
         parse_ipums_extracts(
             external_dir,
             bronze_dir,
             collection="cps",
-            dictionaries_dir=data_root / "reference" / "ipums" / "cps",
+            dictionaries_dir=reference_dir,
+            expected_columns={"YEAR", "AGE", "SEX"},
         )
 
-    narrowed = [e for e in logs if e["event"] == "ipums_bronze_year_narrowed"]
-    assert len(narrowed) == 1
-    assert narrowed[0]["year"] == 2006
-    assert narrowed[0]["lost_columns"] == ["SEX"]
+    refusals = [log for log in logs if log["event"] == "ipums_parse_entry_refused"]
+    assert [log["reason"] for log in refusals] == ["bronze_year_exists"]
+    assert bronze_path(bronze_dir, "cps", 2006).read_bytes() == before
+
+
+def test_new_samples_entry_with_foreign_columns_refused_under_replace(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    # The cps2006_09s regression: a Basic Monthly pull carries WTFINL, which
+    # no ASEC year has, and must be refused even when overwriting is allowed.
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2), ("WTFINL", "Weight", 2)],
+        ("AGE",),
+    )
+    before = bronze_path(bronze_dir, "cps", 2006).read_bytes()
+
+    with structlog.testing.capture_logs() as logs:
+        parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=reference_dir,
+            replace=True,
+        )
+
+    refusals = [log for log in logs if log["event"] == "ipums_parse_entry_refused"]
+    assert [log["reason"] for log in refusals] == ["unexpected_columns"]
+    assert refusals[0]["unexpected"] == ["WTFINL"]
+    assert bronze_path(bronze_dir, "cps", 2006).read_bytes() == before
+
+
+def test_coverage_comes_from_bronze_parquet_not_the_dictionary(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    # A dictionary accumulates and never shrinks, so a year whose parquet was
+    # overwritten by a narrow extract still has a wide dictionary. Reading
+    # coverage from it made the damaged year look covered and skipped it
+    # forever - which is why the 2006 damage could not be repaired in place.
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2), ("SEX", "Sex", 1)],
+        ("AGE", "SEX"),
+    )
+    # Bronze 2006 really holds YEAR/AGE/SEX; make the dictionary claim more.
+    save_variable_dictionary(
+        {name: {"Description": name} for name in ("YEAR", "AGE", "SEX", "EDUC")},
+        reference_dir,
+        2006,
+    )
+    narrow = bronze_path(bronze_dir, "cps", 2006)
+    pd.DataFrame({"YEAR": [2006], "AGE": [9]}).to_parquet(narrow, index=False)
+
+    with structlog.testing.capture_logs() as logs:
+        parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=reference_dir,
+            replace=True,
+            expected_columns={"YEAR", "AGE", "SEX"},
+        )
+
+    # The entry was processed rather than dismissed as already covered.
+    assert not [
+        log for log in logs if log["event"] == "ipums_parse_entry_already_covered"
+    ]
+    assert set(pd.read_parquet(narrow).columns) == {"YEAR", "AGE", "SEX"}
