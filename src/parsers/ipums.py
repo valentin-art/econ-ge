@@ -246,6 +246,7 @@ def parse_to_bronze(
     collection: str,
     bronze_dir: Path,
     chunksize: int = 100_000,
+    *,
     replace: bool = False,
     years: Collection[int] | None = None,
 ) -> list[Path]:
@@ -341,13 +342,12 @@ def parse_to_bronze(
                 tmp_path.unlink(missing_ok=True)
         if errors:
             raise RuntimeError(
-                f"Failed to close {len(errors)} ParquetWriter(s) - "
-                f"check for partial .tmp.parquet files in {bronze_dir}"
+                f"Failed to close {len(errors)} ParquetWriter(s) for "
+                f"{collection} in {bronze_dir} - their partial .tmp.parquet "
+                f"files were removed, no bronze file was replaced"
             ) from errors[0]
 
     if total_rows == 0:
-        for tmp_path, _ in out_paths.values():
-            tmp_path.unlink(missing_ok=True)
         raise ValueError("IPUMS extract has no rows")
 
     # An extract that had rows but none for the requested years is a no-op,
@@ -421,6 +421,8 @@ def merge_variables_into_bronze(
             present in the extract.
 
     Raises:
+        ValueError:
+            The delta extract holds no rows at all (from parse_to_bronze).
         RuntimeError:
             A staged year has no existing bronze file to merge into, the
             staged extract shares no merge_keys with bronze, or the merge
