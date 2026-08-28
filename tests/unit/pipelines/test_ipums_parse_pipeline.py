@@ -716,3 +716,61 @@ def test_unparseable_delta_ddi_surfaces_rather_than_half_merging(
     # fails loudly instead of quietly writing a year with missing columns.
     with pytest.raises(Exception):
         _run_parse(external_dir, bronze_dir, reference_dir)
+
+
+def test_wholesale_reparse_parns_when_year_loses_col(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    external_dir = data_root / "external" / "ipums"
+    bronze_dir = data_root / "bronze" / "ipums"
+    collection_dir = external_dir / "cps"
+
+    # Bronze alread holds 2006 with SEX, from an earlier wide extract
+    wide_ddi = _DDI_TEMPLATE.format(
+        filename="wide.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR + _SEX_VAR
+    )
+    wide_data, wide_ddi_path = _write_extract(
+        collection_dir, "wide", wide_ddi, _FULL_DAT_TEXT
+    )
+    parse_to_bronze(wide_data, wide_ddi_path, "cps", bronze_dir)
+
+    # Incoming new_samples extract covers 2006 but has no SEX
+    narrow_ddi = _DDI_TEMPLATE.format(
+        filename="narrow.dat", vars=_YEAR_VAR + _MONTH_VAR + _AGE_VAR
+    )
+    narrow_data, narrow_ddi_path = _write_extract(
+        collection_dir, "narrow", narrow_ddi, "20060125\n20060230\n"
+    )
+    append_to_manifest(
+        collection_dir,
+        build_extraction_record(
+            source="ipums_api",
+            extraction_id="cps_00002",
+            file_path=narrow_data,
+            metadata={
+                "collection": "cps",
+                "samples": {
+                    "cps2006_09s",
+                },
+                "variables": {
+                    "AGE",
+                },
+                "ddi_path": str(narrow_ddi_path),
+                "extract_id": 2,
+                "request_kind": "new_samples",
+                "force": False,
+            },
+        ),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        parse_ipums_extracts(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            dictionaries_dir=data_root / "reference" / "ipums" / "cps",
+        )
+
+    narrowed = [e for e in logs if e["event"] == "ipums_bronze_year_narrowed"]
+    assert len(narrowed) == 1
+    assert narrowed[0]["year"] == 2006
+    assert narrowed[0]["lost_columns"] == ["SEX"]

@@ -228,6 +228,7 @@ def parse_ipums_extracts(
                     log.warning(
                         "ipums_bronze_year_narrowed",
                         collection=collection,
+                        extract_id=extract_id,
                         year=year,
                         n_lost=len(lost),
                         lost_columns=sorted(lost),

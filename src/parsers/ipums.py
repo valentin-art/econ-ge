@@ -337,7 +337,7 @@ def parse_to_bronze(
         # Nothing downstream can tell a half-written .tmp.parquet from a
         # complete one, and only a rename promotes it, so drop them here
         # rather than leave them for the next run to trip over.
-        if not completed:
+        if not completed or errors:
             for tmp_path, _ in out_paths.values():
                 tmp_path.unlink(missing_ok=True)
         if errors:
