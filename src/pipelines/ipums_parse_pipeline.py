@@ -17,6 +17,7 @@ from src.extractors.ipums_ddi import (
 )
 from src.extractors.manifest import read_manifest
 from src.parsers.ipums import (
+    bronze_columns_by_year,
     bronze_coverage,
     build_and_save_variable_dictionary,
     merge_variables_into_bronze,
@@ -211,7 +212,26 @@ def parse_ipums_extracts(
                 force=force,
             )
         else:
-            touched_paths = parse_to_bronze(data_path, ddi_path, collection, bronze_dir)
+            # Explicitly wholesale, matching what this call has always done:
+            # parse_to_bronze rewrites every year the extract covers, including
+            # years already in bronze.
+            before_columns = bronze_columns_by_year(bronze_dir, collection)
+            touched_paths = parse_to_bronze(
+                data_path, ddi_path, collection, bronze_dir, replace=True
+            )
+            after_columns = bronze_columns_by_year(bronze_dir, collection)
+
+            for year in sorted(int(p.stem) for p in touched_paths):
+                lost = before_columns.get(year, set()) - after_columns.get(year, set())
+                if lost:
+                    log.warning(
+                        "ipums_bronze_year_narrowed",
+                        collection=collection,
+                        extract_id=extract_id,
+                        year=year,
+                        n_lost=len(lost),
+                        lost_columns=sorted(lost),
+                    )
         bronze_paths.extend(touched_paths)
         log.info(
             "ipums_parse_entry_complete",

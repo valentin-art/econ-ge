@@ -4,9 +4,12 @@ codebook into a cleaned JSON variable dictionary (mirrors parsers.cps's
 {variable: {start, end, numeric, Description, Values}} shape).
 """
 
+from __future__ import annotations
+
 import json
 import tempfile
 from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +19,11 @@ import structlog
 from ipumspy import readers
 from ipumspy.ddi import Codebook
 
-from src.input_output.parquet import write_parquet
+from src.input_output.parquet import (
+    ParquetUnreadableError,
+    read_parquet_columns,
+    write_parquet,
+)
 from src.schemas.bronze.ipums_long import (
     check_no_duplicate_columns,
     validate_ipums_long,
@@ -25,6 +32,58 @@ from src.schemas.bronze.ipums_long import (
 log = structlog.get_logger(__name__)
 
 _NUMERIC_VARTYPES = {"numeric", "integer", "float"}
+
+
+@dataclass(slots=True)
+class _YearWriter:
+    """One year's open ParquetWriter and the two paths it moves between."""
+
+    writer: pq.ParquetWriter
+    tmp_path: Path
+    out_path: Path
+
+
+def _open_year_writer(
+    bronze_dir: Path, collection: str, year: int, schema: pa.Schema, *, replace: bool
+) -> _YearWriter:
+    """Open a .tmp.parquet writer for one year, refusing to shadow an existing
+    bronze file unless `replace`."""
+    out_path = bronze_path(bronze_dir, collection, year)
+    if out_path.exists() and not replace:
+        raise FileExistsError(
+            f"Bronze file {out_path} already exists for year "
+            f"{year} - pass replace=True to overwrite it wholesale"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(".tmp.parquet")
+    return _YearWriter(pq.ParquetWriter(tmp_path, schema), tmp_path, out_path)
+
+
+def _close_writers(
+    year_writers: dict[int, _YearWriter],
+    collection: str,
+    bronze_dir: Path,
+    *,
+    completed: bool,
+) -> None:
+    """Close every open writer, then drop the .tmp.parquet files unless the whole
+    stream landed cleanly - only a rename promotes one to bronze, so a survivor of
+    any failure is unusable."""
+    errors = []
+    for year_writer in year_writers.values():
+        try:
+            year_writer.writer.close()
+        except Exception as e:
+            errors.append(e)
+    if not completed or errors:
+        for year_writer in year_writers.values():
+            year_writer.tmp_path.unlink(missing_ok=True)
+    if errors:
+        raise RuntimeError(
+            f"Failed to close {len(errors)} ParquetWriter(s) for "
+            f"{collection} in {bronze_dir} - their partial .tmp.parquet "
+            f"files were removed, no bronze file was replaced"
+        ) from errors[0]
 
 
 def build_variable_dictionary(ddi_codebook: Codebook) -> dict[str, dict[str, object]]:
@@ -154,16 +213,62 @@ def build_and_save_variable_dictionary(
     ]
 
 
-def bronze_coverage(dictionaries_dir: Path) -> dict[int, set[str]]:
-    """{year: set(variable_names)} already reflected in bronze, read straight
-    off dictionaries_dir/*.json's top-level keys.
+def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[str]]:
+    """{year: set(column_names)} read from each {bronze_dir}/{collection}/
+    {year}.parquet footer, without loading any row data.
 
-    This is the "reference dir as source of truth for what's in bronze"
-    check: a year's dictionary file is only ever written/updated at the same
-    time parse_to_bronze/merge_variables_into_bronze touch that year, so its
-    keys are exactly the columns bronze has for that year. Non-numeric
-    filenames (e.g. leftover legacy {collection}_{extract_id}.json files)
-    are ignored.
+    A filename that is not a year, or a file whose Parquet footer will not
+    parse, is warned about and left out of the result, so one stray or
+    corrupt file does not hide the rest. An absent year is therefore
+    "unknown", not "has no columns".
+
+    Args:
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+
+    Returns:
+        dict[int, set[str]]:
+            Columns present per year, empty if no bronze parquet exists yet.
+    """
+    columns_by_year: dict[int, set[str]] = {}
+    for parquet_path in sorted((bronze_dir / collection).glob("*.parquet")):
+        try:
+            year = int(parquet_path.stem)
+        except ValueError:
+            # A leftover .tmp.parquet means a previous run died mid-write, so
+            # it is worth naming rather than passing over in silence.
+            log.warning(
+                "ipums_bronze_parquet_skipped",
+                reason=(
+                    "leftover_tmp_file"
+                    if parquet_path.name.endswith(".tmp.parquet")
+                    else "non_year_filename"
+                ),
+                path=str(parquet_path),
+                collection=collection,
+            )
+            continue
+        try:
+            columns_by_year[year] = set(read_parquet_columns(parquet_path))
+        except ParquetUnreadableError:
+            log.warning(
+                "ipums_bronze_parquet_skipped",
+                reason="unreadable_parquet",
+                path=str(parquet_path),
+                collection=collection,
+                exc_info=True,
+            )
+    return columns_by_year
+
+
+def bronze_coverage(dictionaries_dir: Path) -> dict[int, set[str]]:
+    """{year: set(variable_names)} read from dictionaries_dir/*.json's
+    top-level keys - every variable documented for that year so far.
+
+    Non-numeric filenames (e.g. leftover legacy {collection}_{extract_id}.json
+    files) are ignored.
     """
     coverage: dict[int, set[str]] = {}
     for json_path in dictionaries_dir.glob("*.json"):
@@ -198,6 +303,9 @@ def parse_to_bronze(
     collection: str,
     bronze_dir: Path,
     chunksize: int = 100_000,
+    *,
+    replace: bool = False,
+    years: Collection[int] | None = None,
 ) -> list[Path]:
     """Stream-parse one raw IPUMS extract straight to bronze parquet, split by
     YEAR, without ever holding the full extract in memory.
@@ -206,15 +314,51 @@ def parse_to_bronze(
     across several non-contiguous chunks, so a ParquetWriter is opened
     lazily per year on first sight of that year and kept open (accumulating
     row groups) until every chunk has been processed.
+
+    Each year is written whole, so an extract covering a year that already
+    has a bronze file replaces every column that year had. `replace` is the
+    consent for that.
+
+    Args:
+        data_path (Path):
+            The raw .dat.gz extract.
+        ddi_path (Path):
+            Its DDI .xml codebook.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        chunksize (int):
+            Rows per streamed chunk.
+        replace (bool):
+            Allow overwriting a year that already has a bronze file.
+        years (Collection[int] | None):
+            Write only these years. None writes every year in the extract.
+
+    Returns:
+        list[Path]:
+            The bronze files written, ordered by year. Empty when `years`
+            selected no year present in the extract.
+
+    Raises:
+        FileExistsError:
+            A selected year already has a bronze file and `replace` is False.
+        ValueError:
+            The extract holds no rows at all.
+        RuntimeError:
+            A ParquetWriter could not be closed.
     """
     ddi_codebook = readers.read_ipums_ddi(ddi_path)
     iter_microdata = readers.read_microdata_chunked(
         ddi_codebook, data_path, chunksize=chunksize
     )
+    # `years is not None`, never `if years`: an empty collection means "no
+    # year", and truthiness would silently turn it into "every year".
+    wanted = set(years) if years is not None else None
 
-    writers: dict[int, pq.ParquetWriter] = {}
-    out_paths: dict[int, tuple[Path, Path]] = {}
     total_rows = 0
+    completed = False
+    year_writers: dict[int, _YearWriter] = {}
     try:
         for chunk in iter_microdata:
             check_no_duplicate_columns(chunk)
@@ -223,34 +367,36 @@ def parse_to_bronze(
             total_rows += len(chunk)
             for year, year_df in chunk.groupby("YEAR"):
                 year = int(year)  # type: ignore[arg-type]
+                if wanted is not None and year not in wanted:
+                    continue
                 table = pa.Table.from_pandas(year_df, preserve_index=False)
-                if year not in writers:
-                    out_path = bronze_path(bronze_dir, collection, year)
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = out_path.with_suffix(".tmp.parquet")
-                    writers[year] = pq.ParquetWriter(tmp_path, table.schema)
-                    out_paths[year] = (tmp_path, out_path)
-                writers[year].write_table(table)
+                if year not in year_writers:
+                    year_writers[year] = _open_year_writer(
+                        bronze_dir, collection, year, table.schema, replace=replace
+                    )
+                year_writers[year].writer.write_table(table)
+        completed = True
     finally:
-        errors = []
-        for writer in writers.values():
-            try:
-                writer.close()
-            except Exception as e:
-                errors.append(e)
-        if errors:
-            raise RuntimeError(
-                f"Failed to close {len(errors)} ParquetWriter(s) - "
-                f"check for partial .tmp.parquet files in {bronze_dir}"
-            ) from errors[0]
+        _close_writers(year_writers, collection, bronze_dir, completed=completed)
 
     if total_rows == 0:
         raise ValueError("IPUMS extract has no rows")
 
-    for year, (tmp_path, out_path) in out_paths.items():
-        tmp_path.rename(out_path)
+    # An extract that had rows but none for the requested years is a no-op,
+    # not the empty-extract failure above.
+    if not year_writers:
+        log.warning(
+            "ipums_parse_no_years_written",
+            collection=collection,
+            years=sorted(wanted) if wanted is not None else None,
+            data_path=str(data_path),
+        )
+        return []
 
-    return [out_paths[year][1] for year in sorted(out_paths)]
+    for year_writer in year_writers.values():
+        year_writer.tmp_path.rename(year_writer.out_path)
+
+    return [year_writers[year].out_path for year in sorted(year_writers)]
 
 
 def merge_variables_into_bronze(
@@ -261,7 +407,9 @@ def merge_variables_into_bronze(
     new_variables: list[str],
     merge_keys: tuple[str, ...] = ("YEAR", "MONTH", "SERIAL", "PERNUM"),
     chunksize: int = 100_000,
+    *,
     force: bool = False,
+    years: Collection[int] | None = None,
 ) -> list[Path]:
     """Merge a variable-delta extract (new_variables pulled for samples whose
     other variables are already in bronze) into the existing per-year bronze
@@ -275,16 +423,43 @@ def merge_variables_into_bronze(
     collide with what's already in bronze), left-joins onto the existing
     bronze file for that year, and overwrites it.
 
-    By default an already-present column in `new_variables` is left alone -
-    add_columns only ever adds columns bronze doesn't have yet. With
-    force=True, already-present columns in `new_variables` are instead
-    replaced with the staged extract's values for the rows it covers; every
-    other existing column is untouched.
+    Adds columns and never removes them, so a year merged into ends up wider
+    than the rest rather than reshaped.
 
-    Raises RuntimeError if a staged year has no existing bronze file to merge
-    into - that means the request this delta was planned from doesn't
-    actually correspond to a year already parsed to bronze, which points at
-    a coverage-tracking bug rather than something to silently paper over.
+    Args:
+        data_path (Path):
+            The raw .dat.gz delta extract.
+        ddi_path (Path):
+            Its DDI .xml codebook.
+        collection (str):
+            The IPUMS collection (e.g. "cps").
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        new_variables (list[str]):
+            The columns this delta contributes.
+        merge_keys (tuple[str, ...]):
+            Columns to join the staged extract onto bronze by.
+        chunksize (int):
+            Rows per streamed chunk while staging.
+        force (bool):
+            Replace values of already-present columns in `new_variables` with
+            the staged extract's, for the rows it covers. Left alone by
+            default, so only columns bronze lacks are added.
+        years (Collection[int] | None):
+            Merge only these years. None merges every year in the extract.
+
+    Returns:
+        list[Path]:
+            The bronze files updated. Empty when `years` selected no year
+            present in the extract.
+
+    Raises:
+        ValueError:
+            The delta extract holds no rows at all (from parse_to_bronze).
+        RuntimeError:
+            A staged year has no existing bronze file to merge into, the
+            staged extract shares no merge_keys with bronze, or the merge
+            changed a year's row count.
     """
     with tempfile.TemporaryDirectory() as staging:
         staging_dir = Path(staging)
@@ -294,6 +469,10 @@ def merge_variables_into_bronze(
             collection,
             bronze_dir=staging_dir,
             chunksize=chunksize,
+            # The staging dir is fresh each call, so nothing can collide;
+            # stated rather than relied on.
+            replace=True,
+            years=years,
         )
 
         updated_paths: list[Path] = []
