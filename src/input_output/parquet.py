@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 
@@ -18,8 +17,11 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
     written rather than materialized.
 
     Raises:
+        FileNotFoundError:
+            No file at `path`.
         ParquetUnreadableError:
-            The file is truncated or is not Parquet.
+            The file is truncated, is not Parquet, or carries pandas metadata
+            that will not parse.
     """
     try:
         with pq.ParquetFile(path) as parquet_file:
@@ -32,7 +34,9 @@ def read_parquet_columns(path: Path) -> tuple[str, ...]:
             names = schema.names
     except FileNotFoundError:
         raise
-    except (pa.ArrowInvalid, OSError) as exc:
+    # pa.ArrowInvalid and the JSONDecodeError from a bad `pandas` metadata
+    # blob are both ValueError subclasses.
+    except (ValueError, OSError) as exc:
         raise ParquetUnreadableError(
             f"Could not read the Parquet footer of {path}"
         ) from exc
@@ -44,7 +48,7 @@ def read_parquet(path: Path) -> pd.DataFrame:
     """Read a Parquet file into a DataFrame.
 
     Raises:
-        FileNotFoundError: No file in `path`.
+        FileNotFoundError: No file at `path`.
     """
     if not path.exists():
         raise FileNotFoundError(f"File {path} does not exist.")

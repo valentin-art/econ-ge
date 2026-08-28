@@ -3,12 +3,15 @@ import warnings
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import structlog.testing
 from ipumspy import readers
 
 from src.parsers.ipums import (
+    _close_writers,
+    _YearWriter,
     bronze_columns_by_year,
     bronze_coverage,
     bronze_path,
@@ -21,6 +24,8 @@ from src.parsers.ipums import (
     save_variable_dictionary,
     variable_dictionary_path,
 )
+
+# --- Shared fixtures ------------------------------------------------------------
 
 # Minimal but structurally valid IPUMS DDI 2.5 codebook (trimmed version of a
 # real IPUMS CPS extract's codebook - same elements/namespace as the ones
@@ -105,6 +110,34 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     data_path = tmp_path / "cps_00027.dat.gz"
     data_path.write_bytes(gzip.compress(_DAT_TEXT.encode("iso-8859-1")))
     return data_path, ddi_path
+
+
+# 6 rows across 3 years, ordered so chunksize=2 puts each year's 2 rows in
+# two different, non-adjacent chunks:
+#   chunk 1 (rows 0-1): YEAR 2005, 2006
+#   chunk 2 (rows 2-3): YEAR 2005, 2007
+#   chunk 3 (rows 4-5): YEAR 2006, 2007
+_MULTI_YEAR_DAT_TEXT = "2005011\n2006012\n2005021\n2007011\n2006022\n2007022\n"
+
+
+def _write_multi_year_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    ddi_path = tmp_path / "cps_00027.xml"
+    ddi_path.write_text(_DDI_XML, encoding="utf-8")
+    data_path = tmp_path / "cps_00027.dat.gz"
+    data_path.write_bytes(gzip.compress(_MULTI_YEAR_DAT_TEXT.encode("iso-8859-1")))
+    return data_path, ddi_path
+
+
+def _write_bronze_year(
+    bronze_dir: Path, collection: str, year: int, columns: list[str]
+) -> Path:
+    out_path = bronze_path(bronze_dir, collection, year)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({name: [1] for name in columns}).to_parquet(out_path, index=False)
+    return out_path
+
+
+# --- Variable dictionary: build, save, load -------------------------------------
 
 
 def test_build_variable_dictionary_matches_cps_shape(tmp_path: Path) -> None:
@@ -194,6 +227,63 @@ def test_build_and_save_variable_dictionary(tmp_path: Path) -> None:
     assert "MONTH" in load_variable_dictionary(tmp_path, 2006)
 
 
+def test_build_and_save_variable_dictionary_filters_to_given_variables(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A variable_delta merge writes only its own columns to bronze, so the
+    # dictionary must not claim the rest of the codebook - bronze_coverage
+    # reads these files as the record of what bronze actually holds.
+    ddi_path = tmp_path / "cps_00001.xml"
+    ddi_path.write_text(
+        make_ddi_xml(
+            [
+                ("YEAR", "Survey year", 4),
+                ("ASECWT", "ASEC weight", 5),
+                ("INCWAGE", "Wage income", 7),
+                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dictionaries_dir = tmp_path / "reference"
+
+    build_and_save_variable_dictionary(
+        ddi_path, dictionaries_dir, [2006], variables=["INCWAGE", "QINCWAGE"]
+    )
+
+    dictionary = load_variable_dictionary(dictionaries_dir, 2006)
+    assert set(dictionary) == {"INCWAGE", "QINCWAGE"}
+
+
+def test_build_and_save_variable_dictionary_keeps_everything_by_default(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    # A new_samples pull writes the whole file, so the whole codebook is right.
+    ddi_path = tmp_path / "cps_00001.xml"
+    ddi_path.write_text(
+        make_ddi_xml(
+            [
+                ("YEAR", "Survey year", 4),
+                ("INCWAGE", "Wage income", 7),
+                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dictionaries_dir = tmp_path / "reference"
+
+    build_and_save_variable_dictionary(ddi_path, dictionaries_dir, [2006])
+
+    assert set(load_variable_dictionary(dictionaries_dir, 2006)) == {
+        "YEAR",
+        "INCWAGE",
+        "QINCWAGE",
+    }
+
+
+# --- parse_ipums_extract --------------------------------------------------------
+
+
 def test_parse_ipums_extract_returns_tidy_dataframe(tmp_path: Path) -> None:
     data_path, ddi_path = _write_fixture(tmp_path)
 
@@ -203,6 +293,9 @@ def test_parse_ipums_extract_returns_tidy_dataframe(tmp_path: Path) -> None:
     assert len(df) == 2
     assert df["MONTH"].tolist() == [1, 2]
     assert df["SEX"].tolist() == [1, 2]
+
+
+# --- parse_to_bronze: writing, year split, filters ------------------------------
 
 
 def test_parse_to_bronze_writes_parquet(tmp_path: Path) -> None:
@@ -215,22 +308,6 @@ def test_parse_to_bronze_writes_parquet(tmp_path: Path) -> None:
     df = pd.read_parquet(out_paths[0])
     assert len(df) == 2
     assert df["YEAR"].tolist() == [2006, 2006]
-
-
-# 6 rows across 3 years, ordered so chunksize=2 puts each year's 2 rows in
-# two different, non-adjacent chunks:
-#   chunk 1 (rows 0-1): YEAR 2005, 2006
-#   chunk 2 (rows 2-3): YEAR 2005, 2007
-#   chunk 3 (rows 4-5): YEAR 2006, 2007
-_MULTI_YEAR_DAT_TEXT = "2005011\n2006012\n2005021\n2007011\n2006022\n2007022\n"
-
-
-def _write_multi_year_fixture(tmp_path: Path) -> tuple[Path, Path]:
-    ddi_path = tmp_path / "cps_00027.xml"
-    ddi_path.write_text(_DDI_XML, encoding="utf-8")
-    data_path = tmp_path / "cps_00027.dat.gz"
-    data_path.write_bytes(gzip.compress(_MULTI_YEAR_DAT_TEXT.encode("iso-8859-1")))
-    return data_path, ddi_path
 
 
 def test_parse_to_bronze_splits_by_year_across_chunk_boundaries(
@@ -266,6 +343,108 @@ def test_parse_to_bronze_raises_on_empty_extract(tmp_path: Path) -> None:
         parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
 
 
+def test_parse_to_bronze_years_filter_writes_only_requested_years(
+    tmp_path: Path,
+) -> None:
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)  # 2005/2006/2007
+    bronze_dir = tmp_path / "bronze"
+
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[2006])
+
+    assert out_paths == [bronze_path(bronze_dir, "cps", 2006)]
+    assert not bronze_path(bronze_dir, "cps", 2005).exists()
+    assert not bronze_path(bronze_dir, "cps", 2007).exists()
+
+
+def test_parse_to_bronze_years_filter_matching_nothing_returns_empty(
+    tmp_path: Path,
+) -> None:
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+
+    with structlog.testing.capture_logs() as logs:
+        out_paths = parse_to_bronze(
+            data_path, ddi_path, "cps", bronze_dir, years=[1999]
+        )
+
+    assert out_paths == []
+    assert "ipums_parse_no_years_written" in [entry["event"] for entry in logs]
+
+
+def test_parse_to_bronze_empty_years_filter_writes_nothing(tmp_path: Path) -> None:
+    # An empty filter means "no year", not "every year" - a truthiness check
+    # here would turn it into a full rebuild.
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+
+    assert parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[]) == []
+    assert not (bronze_dir / "cps").exists()
+
+
+def test_parse_to_bronze_still_raises_on_empty_extract_under_years_filter(
+    tmp_path: Path,
+) -> None:
+    # An extract with no rows stays a failure; only a filtered-out one is a
+    # no-op. The two must not collapse into each other.
+    ddi_path = tmp_path / "cps_00027.xml"
+    ddi_path.write_text(_DDI_XML, encoding="utf-8")
+    data_path = tmp_path / "cps_00027.dat.gz"
+    data_path.write_bytes(gzip.compress(b""))
+
+    with pytest.raises(ValueError, match="no rows"):
+        parse_to_bronze(data_path, ddi_path, "cps", tmp_path / "bronze", years=[2006])
+
+
+# --- parse_to_bronze: the overwrite guard ---------------------------------------
+
+
+def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:
+    # The cps2006_09s regression: a new_samples extract landing on a year that
+    # already has bronze used to overwrite every column that year held.
+    data_path, ddi_path = _write_fixture(tmp_path)  # 2006 only
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    with pytest.raises(FileExistsError, match="replace=True"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
+
+    assert existing.read_bytes() == b"existing-bronze"
+    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
+
+
+def test_parse_to_bronze_replace_overwrites_existing_year(tmp_path: Path) -> None:
+    data_path, ddi_path = _write_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, replace=True)
+
+    assert out_paths == [existing]
+    assert bronze_columns_by_year(bronze_dir, "cps") == {2006: {"YEAR", "MONTH", "SEX"}}
+
+
+def test_parse_to_bronze_guard_leaves_other_years_unwritten(tmp_path: Path) -> None:
+    # All-or-nothing: a collision on one year must not leave the extract's other years half-landed in bronze
+    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    existing = bronze_path(bronze_dir, "cps", 2006)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing-bronze")
+
+    with pytest.raises(FileExistsError, match="replace=True"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=1)
+
+    assert existing.read_bytes() == b"existing-bronze"
+    assert sorted(p.name for p in (bronze_dir / "cps").iterdir()) == ["2006.parquet"]
+
+
+# --- parse_to_bronze: failure paths and .tmp.parquet cleanup --------------------
+
+
 def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -298,6 +477,56 @@ def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
 
     assert good_path.read_bytes() == before
     assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
+
+
+def test_parse_to_bronze_removes_tmp_files_when_a_writer_fails_to_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The RuntimeError promises the partials were removed; hold it to that.
+    data_path, ddi_path = _write_fixture(tmp_path)
+    bronze_dir = tmp_path / "bronze"
+    monkeypatch.setattr(
+        pq.ParquetWriter,
+        "close",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="were removed"):
+        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
+
+    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
+    assert not bronze_path(bronze_dir, "cps", 2006).exists()
+
+
+def test_close_writers_drops_every_tmp_file_when_one_writer_fails(
+    tmp_path: Path,
+) -> None:
+    # Mixed failure: unreachable through parse_to_bronze, where patching
+    # ParquetWriter.close breaks every writer at once.
+    class _FailingWriter:
+        def close(self) -> None:
+            raise OSError("disk full")
+
+    good_tmp = tmp_path / "2005.tmp.parquet"
+    bad_tmp = tmp_path / "2006.tmp.parquet"
+    good = _YearWriter(
+        pq.ParquetWriter(good_tmp, pa.schema([("YEAR", pa.int64())])),
+        good_tmp,
+        tmp_path / "2005.parquet",
+    )
+    bad = _YearWriter(_FailingWriter(), bad_tmp, tmp_path / "2006.parquet")  # type: ignore[arg-type]
+    bad_tmp.write_bytes(b"partial")
+
+    with pytest.raises(RuntimeError, match="were removed"):
+        _close_writers({2005: good, 2006: bad}, "cps", tmp_path, completed=True)
+
+    # The healthy year's partial goes too - nothing was renamed, so neither
+    # year landed, and a survivor would be a half-extract on the next run.
+    assert not good_tmp.exists()
+    assert not bad_tmp.exists()
+
+
+# --- merge_variables_into_bronze ------------------------------------------------
 
 
 def test_merge_variables_into_bronze_raises_when_no_merge_columns_present(
@@ -420,6 +649,7 @@ _EXISTING_DDI_XML = """<?xml version="1.0" encoding="UTF-8"?>
   </dataDscr>
 </codeBook>
 """
+
 # YEAR(4) + MONTH(2) + CPSIDP(10) + SEX(1)
 _EXISTING_DAT_TEXT = "20060110000000011\n20060210000000022\n"
 
@@ -493,6 +723,7 @@ _DELTA_DDI_XML = """<?xml version="1.0" encoding="UTF-8"?>
   </dataDscr>
 </codeBook>
 """
+
 # YEAR(4) + MONTH(2) + CPSIDP(10) + RACE(3)
 _DELTA_DAT_TEXT = "2006011000000001100\n2006021000000002200\n"
 
@@ -553,6 +784,66 @@ def test_merge_variables_into_bronze_default_skips_already_present_column(
     pd.testing.assert_frame_equal(before, after)
 
 
+def test_merge_variables_into_bronze_raises_when_bronze_year_missing(
+    tmp_path: Path,
+) -> None:
+    delta_ddi_path = tmp_path / "delta.xml"
+    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "delta.dat.gz"
+    delta_data_path.write_bytes(gzip.compress(_DELTA_DAT_TEXT.encode("iso-8859-1")))
+    bronze_dir = tmp_path / "bronze"  # no existing bronze files at all
+
+    with pytest.raises(RuntimeError, match="missing bronze"):
+        merge_variables_into_bronze(
+            delta_data_path, delta_ddi_path, "cps", bronze_dir, new_variables=["RACE"]
+        )
+
+
+def test_merge_variables_into_bronze_years_filter_restricts_touched_years(
+    tmp_path: Path,
+) -> None:
+    # Repairing one year must not re-merge a delta into every other year it
+    # happens to cover.
+    existing_ddi_path = tmp_path / "existing.xml"
+    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
+    existing_data_path = tmp_path / "existing.dat.gz"
+    existing_data_path.write_bytes(
+        gzip.compress(
+            # YEAR(4) + MONTH(2) + CPSIDP(10) + SEX(1), one row per year.
+            b"20050110000000011\n20060110000000021\n20070110000000031\n"
+        )
+    )
+    bronze_dir = tmp_path / "bronze"
+    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
+    untouched_before = bronze_path(bronze_dir, "cps", 2005).read_bytes()
+
+    delta_ddi_path = tmp_path / "delta.xml"
+    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
+    delta_data_path = tmp_path / "delta.dat.gz"
+    delta_data_path.write_bytes(
+        gzip.compress(
+            # YEAR(4) + MONTH(2) + CPSIDP(10) + RACE(3)
+            b"20050110000000011 00\n20060110000000021 00\n20070110000000031 00\n".replace(
+                b" ", b"1"
+            )
+        )
+    )
+
+    updated = merge_variables_into_bronze(
+        delta_data_path,
+        delta_ddi_path,
+        "cps",
+        bronze_dir,
+        new_variables=["RACE"],
+        years=[2006],
+    )
+
+    assert updated == [bronze_path(bronze_dir, "cps", 2006)]
+    assert "RACE" in bronze_columns_by_year(bronze_dir, "cps")[2006]
+    assert "RACE" not in bronze_columns_by_year(bronze_dir, "cps")[2007]
+    assert bronze_path(bronze_dir, "cps", 2005).read_bytes() == untouched_before
+
+
 # Same DDI/layout as _EXISTING_DDI_XML (YEAR, MONTH, CPSIDP, SEX) but staged
 # as a forced re-pull with SEX values flipped from _EXISTING_DAT_TEXT's - the
 # scenario force=True exists for (e.g. correcting a value from a bad pull).
@@ -605,6 +896,7 @@ def test_merge_variables_into_bronze_force_replaces_existing_column(
 # third sample/month sharing this year's bronze file that this particular
 # forced request isn't touching.
 _EXISTING_DAT_TEXT_3ROWS = "20060110000000011\n20060210000000022\n20060310000000031\n"
+
 # Forces SEX for CPSIDP 1000000001/1000000002 only (flipped values);
 # CPSIDP 1000000003 is absent from this extract entirely.
 _PARTIAL_FORCE_DELTA_DAT_TEXT = "20060110000000012\n20060210000000021\n"
@@ -739,19 +1031,7 @@ def test_merge_variables_into_bronze_force_preserves_column_order_and_dtype(
     assert by_cpsidp.loc[1000000002, "SEX"] == 1
 
 
-def test_merge_variables_into_bronze_raises_when_bronze_year_missing(
-    tmp_path: Path,
-) -> None:
-    delta_ddi_path = tmp_path / "delta.xml"
-    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
-    delta_data_path = tmp_path / "delta.dat.gz"
-    delta_data_path.write_bytes(gzip.compress(_DELTA_DAT_TEXT.encode("iso-8859-1")))
-    bronze_dir = tmp_path / "bronze"  # no existing bronze files at all
-
-    with pytest.raises(RuntimeError, match="missing bronze"):
-        merge_variables_into_bronze(
-            delta_data_path, delta_ddi_path, "cps", bronze_dir, new_variables=["RACE"]
-        )
+# --- bronze_coverage ------------------------------------------------------------
 
 
 def test_bronze_coverage_empty_dir_returns_empty_dict(tmp_path: Path) -> None:
@@ -777,67 +1057,7 @@ def test_bronze_coverage_ignores_non_year_filenames(tmp_path: Path) -> None:
     assert coverage == {2006: {"AGE"}}
 
 
-def test_build_and_save_variable_dictionary_filters_to_given_variables(
-    tmp_path: Path, make_ddi_xml
-) -> None:
-    # A variable_delta merge writes only its own columns to bronze, so the
-    # dictionary must not claim the rest of the codebook - bronze_coverage
-    # reads these files as the record of what bronze actually holds.
-    ddi_path = tmp_path / "cps_00001.xml"
-    ddi_path.write_text(
-        make_ddi_xml(
-            [
-                ("YEAR", "Survey year", 4),
-                ("ASECWT", "ASEC weight", 5),
-                ("INCWAGE", "Wage income", 7),
-                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
-            ]
-        ),
-        encoding="utf-8",
-    )
-    dictionaries_dir = tmp_path / "reference"
-
-    build_and_save_variable_dictionary(
-        ddi_path, dictionaries_dir, [2006], variables=["INCWAGE", "QINCWAGE"]
-    )
-
-    dictionary = load_variable_dictionary(dictionaries_dir, 2006)
-    assert set(dictionary) == {"INCWAGE", "QINCWAGE"}
-
-
-def test_build_and_save_variable_dictionary_keeps_everything_by_default(
-    tmp_path: Path, make_ddi_xml
-) -> None:
-    # A new_samples pull writes the whole file, so the whole codebook is right.
-    ddi_path = tmp_path / "cps_00001.xml"
-    ddi_path.write_text(
-        make_ddi_xml(
-            [
-                ("YEAR", "Survey year", 4),
-                ("INCWAGE", "Wage income", 7),
-                ("QINCWAGE", "Data quality flag for INCWAGE", 1),
-            ]
-        ),
-        encoding="utf-8",
-    )
-    dictionaries_dir = tmp_path / "reference"
-
-    build_and_save_variable_dictionary(ddi_path, dictionaries_dir, [2006])
-
-    assert set(load_variable_dictionary(dictionaries_dir, 2006)) == {
-        "YEAR",
-        "INCWAGE",
-        "QINCWAGE",
-    }
-
-
-def _write_bronze_year(
-    bronze_dir: Path, collection: str, year: int, columns: list[str]
-) -> Path:
-    out_path = bronze_path(bronze_dir, collection, year)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({name: [1] for name in columns}).to_parquet(out_path, index=False)
-    return out_path
+# --- bronze_columns_by_year -----------------------------------------------------
 
 
 def test_bronze_columns_by_year_reads_columns_from_parquet_footers(
@@ -933,163 +1153,3 @@ def test_bronze_columns_by_year_survives_a_pandas_index_file(tmp_path: Path) -> 
     assert set(columns) == {2005, 2006}
     assert columns[2006] == {"YEAR"}
     assert columns[2005] == {"YEAR", "SEX"}
-
-
-def test_parse_to_bronze_refuses_existing_year_without_replace(tmp_path: Path) -> None:
-    # The cps2006_09s regression: a new_samples extract landing on a year that
-    # already has bronze used to overwrite every column that year held.
-    data_path, ddi_path = _write_fixture(tmp_path)  # 2006 only
-    bronze_dir = tmp_path / "bronze"
-    existing = bronze_path(bronze_dir, "cps", 2006)
-    existing.parent.mkdir(parents=True, exist_ok=True)
-    existing.write_bytes(b"existing-bronze")
-
-    with pytest.raises(FileExistsError, match="replace=True"):
-        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
-
-    assert existing.read_bytes() == b"existing-bronze"
-    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
-
-
-def test_parse_to_bronze_replace_overwrites_existing_year(tmp_path: Path) -> None:
-    data_path, ddi_path = _write_fixture(tmp_path)
-    bronze_dir = tmp_path / "bronze"
-    existing = bronze_path(bronze_dir, "cps", 2006)
-    existing.parent.mkdir(parents=True, exist_ok=True)
-    existing.write_bytes(b"existing-bronze")
-
-    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, replace=True)
-
-    assert out_paths == [existing]
-    assert bronze_columns_by_year(bronze_dir, "cps") == {2006: {"YEAR", "MONTH", "SEX"}}
-
-
-def test_parse_to_bronze_years_filter_writes_only_requested_years(
-    tmp_path: Path,
-) -> None:
-    data_path, ddi_path = _write_multi_year_fixture(tmp_path)  # 2005/2006/2007
-    bronze_dir = tmp_path / "bronze"
-
-    out_paths = parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[2006])
-
-    assert out_paths == [bronze_path(bronze_dir, "cps", 2006)]
-    assert not bronze_path(bronze_dir, "cps", 2005).exists()
-    assert not bronze_path(bronze_dir, "cps", 2007).exists()
-
-
-def test_parse_to_bronze_years_filter_matching_nothing_returns_empty(
-    tmp_path: Path,
-) -> None:
-    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
-    bronze_dir = tmp_path / "bronze"
-
-    with structlog.testing.capture_logs() as logs:
-        out_paths = parse_to_bronze(
-            data_path, ddi_path, "cps", bronze_dir, years=[1999]
-        )
-
-    assert out_paths == []
-    assert "ipums_parse_no_years_written" in [entry["event"] for entry in logs]
-
-
-def test_parse_to_bronze_empty_years_filter_writes_nothing(tmp_path: Path) -> None:
-    # An empty filter means "no year", not "every year" - a truthiness check
-    # here would turn it into a full rebuild.
-    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
-    bronze_dir = tmp_path / "bronze"
-
-    assert parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, years=[]) == []
-    assert not (bronze_dir / "cps").exists()
-
-
-def test_parse_to_bronze_still_raises_on_empty_extract_under_years_filter(
-    tmp_path: Path,
-) -> None:
-    # An extract with no rows stays a failure; only a filtered-out one is a
-    # no-op. The two must not collapse into each other.
-    ddi_path = tmp_path / "cps_00027.xml"
-    ddi_path.write_text(_DDI_XML, encoding="utf-8")
-    data_path = tmp_path / "cps_00027.dat.gz"
-    data_path.write_bytes(gzip.compress(b""))
-
-    with pytest.raises(ValueError, match="no rows"):
-        parse_to_bronze(data_path, ddi_path, "cps", tmp_path / "bronze", years=[2006])
-
-
-def test_parse_to_bronze_guard_leaves_other_years_unwritten(tmp_path: Path) -> None:
-    # All-or-nothing: a collision on one year must not leave the extract's other years half-landed in bronze
-    data_path, ddi_path = _write_multi_year_fixture(tmp_path)
-    bronze_dir = tmp_path / "bronze"
-    existing = bronze_path(bronze_dir, "cps", 2006)
-    existing.parent.mkdir(parents=True, exist_ok=True)
-    existing.write_bytes(b"existing-bronze")
-
-    with pytest.raises(FileExistsError, match="replace=True"):
-        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir, chunksize=1)
-
-    assert existing.read_bytes() == b"existing-bronze"
-    assert sorted(p.name for p in (bronze_dir / "cps").iterdir()) == ["2006.parquet"]
-
-
-def test_parse_to_bronze_removes_tmp_files_when_a_writer_fails_to_close(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The RuntimeError promises the partials were removed; hold it to that.
-    data_path, ddi_path = _write_fixture(tmp_path)
-    bronze_dir = tmp_path / "bronze"
-    monkeypatch.setattr(
-        pq.ParquetWriter,
-        "close",
-        lambda self: (_ for _ in ()).throw(OSError("disk full")),
-    )
-
-    with pytest.raises(RuntimeError, match="were removed"):
-        parse_to_bronze(data_path, ddi_path, "cps", bronze_dir)
-
-    assert list((bronze_dir / "cps").glob("*.tmp.parquet")) == []
-    assert not bronze_path(bronze_dir, "cps", 2006).exists()
-
-
-def test_merge_variables_into_bronze_years_filter_restricts_touched_years(
-    tmp_path: Path,
-) -> None:
-    # Repairing one year must not re-merge a delta into every other year it
-    # happens to cover.
-    existing_ddi_path = tmp_path / "existing.xml"
-    existing_ddi_path.write_text(_EXISTING_DDI_XML, encoding="utf-8")
-    existing_data_path = tmp_path / "existing.dat.gz"
-    existing_data_path.write_bytes(
-        gzip.compress(
-            # YEAR(4) + MONTH(2) + CPSIDP(10) + SEX(1), one row per year.
-            b"20050110000000011\n20060110000000021\n20070110000000031\n"
-        )
-    )
-    bronze_dir = tmp_path / "bronze"
-    parse_to_bronze(existing_data_path, existing_ddi_path, "cps", bronze_dir)
-    untouched_before = bronze_path(bronze_dir, "cps", 2005).read_bytes()
-
-    delta_ddi_path = tmp_path / "delta.xml"
-    delta_ddi_path.write_text(_DELTA_DDI_XML, encoding="utf-8")
-    delta_data_path = tmp_path / "delta.dat.gz"
-    delta_data_path.write_bytes(
-        gzip.compress(
-            # YEAR(4) + MONTH(2) + CPSIDP(10) + RACE(3)
-            b"20050110000000011 00\n20060110000000021 00\n20070110000000031 00\n".replace(
-                b" ", b"1"
-            )
-        )
-    )
-
-    updated = merge_variables_into_bronze(
-        delta_data_path,
-        delta_ddi_path,
-        "cps",
-        bronze_dir,
-        new_variables=["RACE"],
-        years=[2006],
-    )
-
-    assert updated == [bronze_path(bronze_dir, "cps", 2006)]
-    assert "RACE" in bronze_columns_by_year(bronze_dir, "cps")[2006]
-    assert "RACE" not in bronze_columns_by_year(bronze_dir, "cps")[2007]
-    assert bronze_path(bronze_dir, "cps", 2005).read_bytes() == untouched_before

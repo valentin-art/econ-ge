@@ -4,9 +4,12 @@ codebook into a cleaned JSON variable dictionary (mirrors parsers.cps's
 {variable: {start, end, numeric, Description, Values}} shape).
 """
 
+from __future__ import annotations
+
 import json
 import tempfile
 from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +32,58 @@ from src.schemas.bronze.ipums_long import (
 log = structlog.get_logger(__name__)
 
 _NUMERIC_VARTYPES = {"numeric", "integer", "float"}
+
+
+@dataclass(slots=True)
+class _YearWriter:
+    """One year's open ParquetWriter and the two paths it moves between."""
+
+    writer: pq.ParquetWriter
+    tmp_path: Path
+    out_path: Path
+
+
+def _open_year_writer(
+    bronze_dir: Path, collection: str, year: int, schema: pa.Schema, *, replace: bool
+) -> _YearWriter:
+    """Open a .tmp.parquet writer for one year, refusing to shadow an existing
+    bronze file unless `replace`."""
+    out_path = bronze_path(bronze_dir, collection, year)
+    if out_path.exists() and not replace:
+        raise FileExistsError(
+            f"Bronze file {out_path} already exists for year "
+            f"{year} - pass replace=True to overwrite it wholesale"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(".tmp.parquet")
+    return _YearWriter(pq.ParquetWriter(tmp_path, schema), tmp_path, out_path)
+
+
+def _close_writers(
+    year_writers: dict[int, _YearWriter],
+    collection: str,
+    bronze_dir: Path,
+    *,
+    completed: bool,
+) -> None:
+    """Close every open writer, then drop the .tmp.parquet files unless the whole
+    stream landed cleanly - only a rename promotes one to bronze, so a survivor of
+    any failure is unusable."""
+    errors = []
+    for year_writer in year_writers.values():
+        try:
+            year_writer.writer.close()
+        except Exception as e:
+            errors.append(e)
+    if not completed or errors:
+        for year_writer in year_writers.values():
+            year_writer.tmp_path.unlink(missing_ok=True)
+    if errors:
+        raise RuntimeError(
+            f"Failed to close {len(errors)} ParquetWriter(s) for "
+            f"{collection} in {bronze_dir} - their partial .tmp.parquet "
+            f"files were removed, no bronze file was replaced"
+        ) from errors[0]
 
 
 def build_variable_dictionary(ddi_codebook: Codebook) -> dict[str, dict[str, object]]:
@@ -176,9 +231,6 @@ def bronze_columns_by_year(bronze_dir: Path, collection: str) -> dict[int, set[s
     Returns:
         dict[int, set[str]]:
             Columns present per year, empty if no bronze parquet exists yet.
-
-    Raises:
-        ParquetUnreadableError: Parquet file is currupted and unreadable.
     """
     columns_by_year: dict[int, set[str]] = {}
     for parquet_path in sorted((bronze_dir / collection).glob("*.parquet")):
@@ -304,10 +356,9 @@ def parse_to_bronze(
     # year", and truthiness would silently turn it into "every year".
     wanted = set(years) if years is not None else None
 
-    writers: dict[int, pq.ParquetWriter] = {}
-    out_paths: dict[int, tuple[Path, Path]] = {}
     total_rows = 0
     completed = False
+    year_writers: dict[int, _YearWriter] = {}
     try:
         for chunk in iter_microdata:
             check_no_duplicate_columns(chunk)
@@ -319,45 +370,21 @@ def parse_to_bronze(
                 if wanted is not None and year not in wanted:
                     continue
                 table = pa.Table.from_pandas(year_df, preserve_index=False)
-                if year not in writers:
-                    out_path = bronze_path(bronze_dir, collection, year)
-                    if out_path.exists() and not replace:
-                        raise FileExistsError(
-                            f"Bronze file {out_path} already exists for year "
-                            f"{year} - pass replace=True to overwrite it wholesale"
-                        )
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = out_path.with_suffix(".tmp.parquet")
-                    writers[year] = pq.ParquetWriter(tmp_path, table.schema)
-                    out_paths[year] = (tmp_path, out_path)
-                writers[year].write_table(table)
+                if year not in year_writers:
+                    year_writers[year] = _open_year_writer(
+                        bronze_dir, collection, year, table.schema, replace=replace
+                    )
+                year_writers[year].writer.write_table(table)
         completed = True
     finally:
-        errors = []
-        for writer in writers.values():
-            try:
-                writer.close()
-            except Exception as e:
-                errors.append(e)
-        # Nothing downstream can tell a half-written .tmp.parquet from a
-        # complete one, and only a rename promotes it, so drop them here
-        # rather than leave them for the next run to trip over.
-        if not completed or errors:
-            for tmp_path, _ in out_paths.values():
-                tmp_path.unlink(missing_ok=True)
-        if errors:
-            raise RuntimeError(
-                f"Failed to close {len(errors)} ParquetWriter(s) for "
-                f"{collection} in {bronze_dir} - their partial .tmp.parquet "
-                f"files were removed, no bronze file was replaced"
-            ) from errors[0]
+        _close_writers(year_writers, collection, bronze_dir, completed=completed)
 
     if total_rows == 0:
         raise ValueError("IPUMS extract has no rows")
 
     # An extract that had rows but none for the requested years is a no-op,
     # not the empty-extract failure above.
-    if not out_paths:
+    if not year_writers:
         log.warning(
             "ipums_parse_no_years_written",
             collection=collection,
@@ -366,10 +393,10 @@ def parse_to_bronze(
         )
         return []
 
-    for year, (tmp_path, out_path) in out_paths.items():
-        tmp_path.rename(out_path)
+    for year_writer in year_writers.values():
+        year_writer.tmp_path.rename(year_writer.out_path)
 
-    return [out_paths[year][1] for year in sorted(out_paths)]
+    return [year_writers[year].out_path for year in sorted(year_writers)]
 
 
 def merge_variables_into_bronze(
