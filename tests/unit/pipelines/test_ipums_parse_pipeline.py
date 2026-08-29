@@ -61,7 +61,7 @@ def test_refusal_reason_blocks_a_year_is_in_coverage_but_not_in_sample_years() -
             summary_known=True,
             replace=False,
         )
-        == "unknown years"
+        == "unknown_years"
     )
 
 

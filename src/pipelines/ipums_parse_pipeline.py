@@ -164,7 +164,7 @@ def _refusal_reason(
     years_already_in_bronze = sample_years & coverage_years
 
     if not sample_years:
-        return None if not coverage_years else "unknown years"
+        return None if not coverage_years else "unknown_years"
     if not years_already_in_bronze:
         return None
     if not summary_known:
