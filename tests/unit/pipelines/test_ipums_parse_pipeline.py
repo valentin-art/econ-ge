@@ -1320,7 +1320,7 @@ def test_repair_bronze_years_refuses_an_empty_expected_columns(
 
 def test_repair_raises_when_a_targeted_year_has_no_bronze_file(
     tmp_path: Path, make_ddi_xml, make_fixed_width_dat
-):
+) -> None:
     external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
         tmp_path,
         make_ddi_xml,
@@ -1343,7 +1343,7 @@ def test_repair_raises_when_a_targeted_year_has_no_bronze_file(
 
 def test_repair_skips_an_empty_years_argument_without_touching_bronze(
     tmp_path: Path, make_ddi_xml, make_fixed_width_dat
-):
+) -> None:
     # `years=[]` means "no year", never "every year"
     external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
         tmp_path,
@@ -1353,6 +1353,7 @@ def test_repair_skips_an_empty_years_argument_without_touching_bronze(
         ("WTFINL",),
         bronze_vars=[("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
     )
+    before = bronze_path(bronze_dir, "cps", 2006).read_bytes()
 
     with structlog.testing.capture_logs() as logs:
         assert (
@@ -1367,28 +1368,7 @@ def test_repair_skips_an_empty_years_argument_without_touching_bronze(
             == []
         )
     assert [log["reason"] for log in logs] == ["empty_years_argument"]
-
-
-def test_repair_refuses_an_empty_expected_columns(
-    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
-):
-    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
-        tmp_path,
-        make_ddi_xml,
-        make_fixed_width_dat,
-        [("YEAR", "Survey year", 4), ("WTFINL", "Weight", 2)],
-        ("WTFINL",),
-        bronze_vars=[("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
-    )
-    with pytest.raises(ValueError, match="expected_columns is empty"):
-        repair_bronze_years(
-            external_dir,
-            bronze_dir,
-            collection="cps",
-            expected_columns=set(),
-            dictionaries_dir=reference_dir,
-            years=[],
-        )
+    assert bronze_path(bronze_dir, "cps", 2006).read_bytes() == before
 
 
 def test_check_bronze_columns_refuses_an_empty_expected_columns(

@@ -4,9 +4,8 @@ transforms and stores it into bronze-layer parquet files.
 Also builds and saves each extract's DDI-derived JSON variable dictionary.
 """
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import Mapping
 
 import structlog
 
@@ -199,10 +198,22 @@ def _refusal_reason(
 def _resolve_expected(
     observed: Mapping[int, Collection[str]], expected_columns: Collection[str] | None
 ) -> frozenset[str]:
-    """The declared expected column set, or the modal one derived from bronze."""
-    if expected_columns is not None:
-        return frozenset(expected_columns)
-    return modal_columns(observed)
+    """The declared expected column set, or the modal one derived from bronze.
+
+    Raises:
+        ValueError:
+            `expected_columns` is declared but empty. It cannot constrain
+            anything: _refusal_reason's column gate (`if expected and ...`)
+            goes dead and every year trivially conforms.
+    """
+    if expected_columns is None:
+        return modal_columns(observed)
+
+    if not expected_columns:
+        raise ValueError(
+            "expected_columns is empty - pass None to derive the set from bronze"
+        )
+    return frozenset(expected_columns)
 
 
 def parse_ipums_extracts(
@@ -246,6 +257,8 @@ def parse_ipums_extracts(
             A list of paths with bronze data for a given collection.
 
     Raises:
+         ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
         RuntimeError:
             No usable manifest entry for `collection` is backed by files on
             disk. Nothing is written.
@@ -464,14 +477,6 @@ def check_bronze_columns(
         ValueError:
             `expected_columns` is empty. Pass None to derive the set instead.
     """
-    if expected_columns is not None and not expected_columns:
-        # Not equivalent to None: every year trivially conforms against an
-        # empty set, so this would report a healthy collection without having
-        # checked anything.
-        raise ValueError(
-            "expected_columns is empty - pass None to derive the set from bronze"
-        )
-
     observed = bronze_columns_by_year(bronze_dir, collection)
     expected = _resolve_expected(
         observed=observed,
@@ -535,15 +540,6 @@ def repair_bronze_years(
     if dictionaries_dir is None:
         dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
 
-    if expected_columns is not None and not expected_columns:
-        # Not equivalent to None: an empty set disarms _refusal_reason's column
-        # gate (`if expected and ...`) while making every year trivially
-        # conform, so a replace=True run would rewrite years unguarded and then
-        # certify the result.
-        raise ValueError(
-            "expected_columns is empty - pass None to derive the set from bronze"
-        )
-
     observed = bronze_columns_by_year(bronze_dir, collection)
     expected = _resolve_expected(
         observed=observed,
@@ -592,13 +588,7 @@ def repair_bronze_years(
     # A year with no readable parquet is absent from `repaired`, not deviating
     # in it, so bronze_column_deviations alone would certify it as repaired.
     deviations = bronze_column_deviations(repaired, expected)
-    still_deviating = sorted(
-        (
-            set(bronze_column_deviations(repaired, expected))
-            | (targets - repaired.keys())
-        )
-        & targets
-    )
+    still_deviating = sorted((set(deviations) | (targets - repaired.keys())) & targets)
     if still_deviating:
         detail = _deviation_detail(
             years=still_deviating,
