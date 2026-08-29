@@ -6,6 +6,7 @@ Also builds and saves each extract's DDI-derived JSON variable dictionary.
 
 from collections.abc import Collection
 from pathlib import Path
+from typing import Mapping
 
 import structlog
 
@@ -83,6 +84,24 @@ def _collection_manifest_entries(external_dir: Path, collection: str) -> list[di
         key=lambda e: e["metadata"].get("request_kind", "new_samples") != "new_samples"
     )
     return entries
+
+
+def _deviation_detail(
+    years: list[int],
+    repaired: Mapping[int, Collection[str]],
+    deviations: Mapping[int, tuple[tuple[str, ...], tuple[str, ...]]],
+) -> str:
+    """One line per year for the repair failure message."""
+    parts = []
+    for year in years:
+        # Absent from `repaired` means no readable parquet at all, so the year
+        # reached still_deviating via targets - repaired.keys(), not deviations.
+        if year not in repaired:
+            parts.append(f"{year}: no bronze file")
+            continue
+        missing, extra = deviations[year]
+        parts.append(f"{year}: missing {list(missing)}, extra {list(extra)}")
+    return "; ".join(parts)
 
 
 def _entry_needs_processing(
@@ -177,6 +196,15 @@ def _refusal_reason(
     return None
 
 
+def _resolve_expected(
+    observed: Mapping[int, Collection[str]], expected_columns: Collection[str] | None
+) -> frozenset[str]:
+    """The declared expected column set, or the modal one derived from bronze."""
+    if expected_columns is not None:
+        return frozenset(expected_columns)
+    return modal_columns(observed)
+
+
 def parse_ipums_extracts(
     external_dir: Path,
     bronze_dir: Path,
@@ -240,11 +268,11 @@ def parse_ipums_extracts(
     coverage = bronze_columns_by_year(bronze_dir, collection)
     # Frozen for the whole run, so an entry that shrinks a year partway
     # through cannot move the target the later entries are judged against.
-    expected = (
-        frozenset(expected_columns)
-        if expected_columns is not None
-        else modal_columns(coverage)
+    expected = _resolve_expected(
+        observed=coverage,
+        expected_columns=expected_columns,
     )
+
     years_filter = set(years) if years is not None else None
 
     for entry in entries:
@@ -445,10 +473,9 @@ def check_bronze_columns(
         )
 
     observed = bronze_columns_by_year(bronze_dir, collection)
-    expected = (
-        frozenset(expected_columns)
-        if expected_columns is not None
-        else modal_columns(observed)
+    expected = _resolve_expected(
+        observed=observed,
+        expected_columns=expected_columns,
     )
 
     return bronze_column_deviations(observed, expected)
@@ -518,10 +545,9 @@ def repair_bronze_years(
         )
 
     observed = bronze_columns_by_year(bronze_dir, collection)
-    expected = (
-        frozenset(expected_columns)
-        if expected_columns is not None
-        else modal_columns(observed)
+    expected = _resolve_expected(
+        observed=observed,
+        expected_columns=expected_columns,
     )
 
     targets = (
@@ -574,19 +600,14 @@ def repair_bronze_years(
         & targets
     )
     if still_deviating:
-        detail = []
-        for year in still_deviating:
-            # A year absent from `repaired` has no readable parquet at all, so
-            # it is in still_deviating via the targets - repaired.keys() term
-            # rather than via deviations.
-            if year not in repaired:
-                detail.append(f"{year}: no bronze file")
-                continue
-            missing, extra = deviations[year]
-            detail.append(f"{year}: missing {list(missing)}, extra {list(extra)}")
+        detail = _deviation_detail(
+            years=still_deviating,
+            repaired=repaired,
+            deviations=deviations,
+        )
         raise RuntimeError(
             f"Repair left {collection!r} years deviating from the expected columns "
-            f"{sorted(expected)} - {'; '.join(detail)}. Either no extract on disk "
+            f"{sorted(expected)} - {detail}. Either no extract on disk "
             f"covers them, or a later manifest entry rewrote the year narrower."
         )
     log.info(
