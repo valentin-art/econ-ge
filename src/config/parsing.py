@@ -12,7 +12,6 @@ the expected set from the years already in bronze, which is the right default
 for a collection whose shape nobody has had to pin down yet.
 """
 
-from collections.abc import Collection
 from pathlib import Path
 
 import structlog
@@ -119,10 +118,3 @@ def load_collection_expected_columns(
                 f"loaded as {collection!r}"
             )
     return columns
-
-
-def describe_columns(columns: Collection[str] | None) -> str:
-    """Short human-readable summary of a contract, for CLI output."""
-    if columns is None:
-        return "derived from bronze"
-    return f"{len(columns)} declared column(s)"
