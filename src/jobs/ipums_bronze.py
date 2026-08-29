@@ -12,11 +12,11 @@ import click
 from src.config.parsing import describe_columns, load_collection_expected_columns
 from src.config.settings import settings
 from src.pipelines.ipums_parse_pipeline import (
+    bronze_columns_by_year,
     check_bronze_columns,
     repair_bronze_years,
 )
 from src.utils.logging import configure_logging
-
 
 _MAX_LISTED_COLUMNS = 12
 
@@ -51,9 +51,19 @@ def check(collection: str) -> None:
     bronze_dir = settings.paths.bronze / "ipums"
     expected = _expected_columns(collection)
     click.echo(f"{collection}: contract is {describe_columns(expected)}.")
+
+    observed = bronze_columns_by_year(bronze_dir, collection)
+    if not observed:
+        raise click.ClickException(
+            f"{collection}: no bronze year found under {bronze_dir / collection}"
+        )
+
     deviations = check_bronze_columns(bronze_dir, collection, expected_columns=expected)
     if not deviations:
-        click.echo(f"{collection}: every bronze year holds the expected columns.")
+        click.echo(
+            f"{collection}: all {len(observed)} bronze year(s) hold the "
+            f"expected columns."
+        )
         return
 
     click.echo(f"{collection}: {len(deviations)} year(s) deviate.")
