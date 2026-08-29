@@ -504,7 +504,11 @@ def repair_bronze_years(
     )
     if not targets:
         log.info(
-            "ipums_bronze_repair_skipped", collection=collection, reason="no_years"
+            "ipums_bronze_repair_skipped",
+            collection=collection,
+            reason="empty_years_argument"
+            if years is not None
+            else ("no_bronze" if not observed else "all_years_conform"),
         )
         return []
 
