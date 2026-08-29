@@ -43,9 +43,9 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
     Raises:
         ValueError:
             The file exists but `expected_columns` is not a list of strings,
-            or it names the same column twice. A malformed contract must not
-            quietly become a narrower one - that would refuse valid extracts
-            and mark good years as damaged.
+            emtpy list, or it names the same column twice. A malformed contract
+            must not quietly become a narrower one - that would refuse valid
+            extracts and mark good years as damaged.
     """
     if not path.exists():
         return None
@@ -53,8 +53,17 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
     if not isinstance(payload, dict):
         raise ValueError(f"Parsing config {path} must be a mapping")
     columns = payload.get("expected_columns")
+
     if columns is None:
         return None
+
+    if not columns:
+        raise ValueError(
+            f"Parsing config {path} declares an empty 'expected_columns' - "
+            f"delete the file to derive the set from bronze instead or "
+            f"add columns"
+        )
+
     if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
         raise ValueError(
             f"Parsing config {path} has an 'expected_columns' that is not a "
@@ -75,8 +84,41 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
 def load_collection_expected_columns(
     config_root: Path, source: str, collection: str
 ) -> frozenset[str] | None:
-    """load_expected_columns for a collection's conventional config location."""
-    return load_expected_columns(parsing_config_path(config_root, source, collection))
+    """load_expected_columns for a collection's conventional config location.
+
+    Args:
+        config_root (Path):
+            A folder with parse config files
+        source (str):
+            A data source name (e.g., "ipums")
+        collection (str):
+            A collection name (e.g., "cps")
+
+    Returns:
+        frozenset[str] | None
+            A set of columns from parse config file if any. Otherwise, None.
+
+    Raises:
+        ValueError:
+            Collection in the parse config file is different from requested
+            collection.
+    """
+    path = parsing_config_path(config_root, source, collection)
+    columns = load_expected_columns(path)
+
+    if columns is not None:
+        parse_config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        parse_config_collection = parse_config.get("collection")
+
+        if (
+            parse_config_collection is not None
+            and parse_config_collection != collection
+        ):
+            raise ValueError(
+                f"Parsing config {path} declares collection {parse_config_collection!r}"
+                f"loaded as {collection!r}"
+            )
+    return columns
 
 
 def describe_columns(columns: Collection[str] | None) -> str:
