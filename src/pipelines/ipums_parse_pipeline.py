@@ -339,14 +339,25 @@ def parse_ipums_extracts(
                     unexpected=sorted(variables - expected),
                 )
                 continue
-            touched_paths = parse_to_bronze(
-                data_path,
-                ddi_path,
-                collection,
-                bronze_dir,
-                replace=replace,
-                years=years_filter,
-            )
+            try:
+                touched_paths = parse_to_bronze(
+                    data_path,
+                    ddi_path,
+                    collection,
+                    bronze_dir,
+                    replace=replace,
+                    years=years_filter,
+                )
+            except FileExistsError:
+                # Just log that file and continue, don't raise
+                log.warning(
+                    "ipums_parse_entry_refused",
+                    collection=collection,
+                    extract_id=extract_id,
+                    reason="bronze_year_exists",
+                )
+                continue
+
         bronze_paths.extend(touched_paths)
         log.info(
             "ipums_parse_entry_complete",
