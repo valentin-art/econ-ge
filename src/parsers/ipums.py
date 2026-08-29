@@ -199,15 +199,15 @@ def prune_variable_dictionary(
     if not removed:
         return None
     pruned = {name: entry for name, entry in existing.items() if name in keep}
+    out_path.write_text(
+        json.dumps(pruned, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     log.warning(
         "ipums_variable_dictionary_pruned",
         year=year,
         removed=removed,
         n_kept=len(pruned),
-    )
-    out_path.write_text(
-        json.dumps(pruned, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
     return out_path
 
