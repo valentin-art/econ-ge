@@ -46,8 +46,8 @@ def modal_columns(observed: Mapping[int, Collection[str]]) -> frozenset[str]:
     intersection would shrink to its remnants.
 
     Ties break on (count, n_columns), so when exactly two shapes appear the
-    same number of times the wider one wins - a year can only ever be judged
-    against a target at least as complete as itself.
+    same number of times "a tie on both count and width resolves to the earliest
+    year's shape.
 
     Args:
         observed (Mapping[int, Collection[str]]):

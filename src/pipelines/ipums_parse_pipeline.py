@@ -187,6 +187,7 @@ def parse_ipums_extracts(
     bronze_dir: Path,
     collection: str,
     dictionaries_dir: Path | None = None,
+    *,
     replace: bool = False,
     years: Collection[int] | None = None,
     expected_columns: Collection[str] | None = None,
@@ -336,7 +337,9 @@ def parse_ipums_extracts(
                     extract_id=extract_id,
                     reason=refusal,
                     years=sorted(years_already_in_bronze),
-                    unexpected=sorted(variables - expected),
+                    unexpected=sorted(variables - expected)
+                    if refusal == "unexpected_columns"
+                    else None,
                 )
                 continue
             try:
@@ -357,6 +360,9 @@ def parse_ipums_extracts(
                     reason="bronze_year_exists",
                 )
                 continue
+
+        if not touched_paths:
+            continue
 
         bronze_paths.extend(touched_paths)
         log.info(
