@@ -473,7 +473,9 @@ def repair_bronze_years(
             The years to rebuild. None targets every deviating year.
         expected_columns (Collection[str] | None):
             The column set every year is meant to hold. None derives it from
-            the years already in bronze.
+            the years already in bronze - modal, so it collapses onto the
+            damaged shape when most years are damaged. Declare it explicitly
+            for a repair over a collection you know to be widely broken.
         dictionaries_dir (Path | None):
             A path to the collection's variable dictionaries. None uses
             data/reference/ipums/<collection>.
