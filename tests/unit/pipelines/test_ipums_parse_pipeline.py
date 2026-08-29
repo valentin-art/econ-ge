@@ -17,7 +17,9 @@ from src.parsers.ipums import (
 from src.pipelines.ipums_parse_pipeline import (
     _entry_needs_processing,
     _refusal_reason,
+    check_bronze_columns,
     parse_ipums_extracts,
+    repair_bronze_years,
 )
 
 _EXPECTED = frozenset({"YEAR", "AGE", "SEX"})
@@ -1059,3 +1061,141 @@ def test_deviating_year_is_reported_after_the_run(
     ]
     assert [log["year"] for log in deviations] == [2006]
     assert deviations[0]["missing"] == ["EDUC"]
+
+
+# --- Repairing a damaged year ------------------------------------------------
+
+
+def test_repair_bronze_years_rebuilds_the_damaged_year_and_prunes_its_dictionary(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    # A miniature of the real 2006 case: a wide pull built the years, a
+    # wrong-grain entry replaced one of them, and the repair has to replay
+    # the wide pull for that year alone while still refusing the entry that
+    # caused the damage.
+    data_root = tmp_path / "data"
+    external_dir = data_root / "external" / "ipums"
+    bronze_dir = data_root / "bronze" / "ipums"
+    reference_dir = data_root / "reference" / "ipums" / "cps"
+    collection_dir = external_dir / "cps"
+    collection_dir.mkdir(parents=True, exist_ok=True)
+
+    wide_vars = [("YEAR", "Survey year", 4), ("AGE", "Age", 2), ("SEX", "Sex", 1)]
+    (collection_dir / "wide.xml").write_text(make_ddi_xml(wide_vars), encoding="utf-8")
+    (collection_dir / "wide.dat.gz").write_bytes(
+        make_fixed_width_dat([[2005, 25, 1], [2006, 30, 2], [2007, 41, 1]], wide_vars)
+    )
+    append_to_manifest(
+        collection_dir,
+        build_extraction_record(
+            source="ipums_api",
+            extraction_id="cps_00001",
+            file_path=collection_dir / "wide.dat.gz",
+            metadata={
+                "collection": "cps",
+                "samples": ("cps2005_03s", "cps2006_03s", "cps2007_03s"),
+                "variables": ("AGE", "SEX"),
+                "ddi_path": str(collection_dir / "wide.xml"),
+                "extract_id": 1,
+                "request_kind": "new_samples",
+                "force": False,
+            },
+        ),
+    )
+
+    # A wrong-grain entry for 2006 only, carrying a column no year has.
+    foreign_vars = [("YEAR", "Survey year", 4), ("WTFINL", "Weight", 2)]
+    (collection_dir / "foreign.xml").write_text(
+        make_ddi_xml(foreign_vars), encoding="utf-8"
+    )
+    (collection_dir / "foreign.dat.gz").write_bytes(
+        make_fixed_width_dat([[2006, 77]], foreign_vars)
+    )
+    append_to_manifest(
+        collection_dir,
+        build_extraction_record(
+            source="ipums_api",
+            extraction_id="cps_00002",
+            file_path=collection_dir / "foreign.dat.gz",
+            metadata={
+                "collection": "cps",
+                "samples": ("cps2006_09s",),
+                "variables": ("WTFINL",),
+                "ddi_path": str(collection_dir / "foreign.xml"),
+                "extract_id": 2,
+                "request_kind": "new_samples",
+                "force": False,
+            },
+        ),
+    )
+
+    parse_ipums_extracts(
+        external_dir, bronze_dir, collection="cps", dictionaries_dir=reference_dir
+    )
+    # Simulate the damage the guard now prevents: 2006 replaced wholesale by
+    # the wrong-grain extract, with its dictionary left claiming the old set.
+    pd.DataFrame({"YEAR": [2006], "WTFINL": [77]}).to_parquet(
+        bronze_path(bronze_dir, "cps", 2006), index=False
+    )
+    save_variable_dictionary({"WTFINL": {"Description": "Weight"}}, reference_dir, 2006)
+    untouched_2005 = bronze_path(bronze_dir, "cps", 2005).read_bytes()
+    assert check_bronze_columns(bronze_dir, "cps") != {}
+
+    repair_bronze_years(
+        external_dir, bronze_dir, collection="cps", dictionaries_dir=reference_dir
+    )
+
+    assert check_bronze_columns(bronze_dir, "cps") == {}
+    repaired = pd.read_parquet(bronze_path(bronze_dir, "cps", 2006))
+    assert set(repaired.columns) == {"YEAR", "AGE", "SEX"}
+    assert repaired["AGE"].tolist() == [30]
+    # The other years were never rewritten.
+    assert bronze_path(bronze_dir, "cps", 2005).read_bytes() == untouched_2005
+    # And the dictionary no longer claims a column the year does not have.
+    assert "WTFINL" not in load_variable_dictionary(reference_dir, 2006)
+
+
+def test_repair_bronze_years_is_a_noop_when_every_year_conforms(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+        ("AGE",),
+    )
+
+    assert (
+        repair_bronze_years(
+            external_dir, bronze_dir, collection="cps", dictionaries_dir=reference_dir
+        )
+        == []
+    )
+
+
+def test_repair_bronze_years_raises_when_a_targeted_year_still_deviates(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A repair that silently half-worked is worse than one that fails loudly.
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+        ("AGE",),
+    )
+    monkeypatch.setattr(
+        "src.pipelines.ipums_parse_pipeline.parse_ipums_extracts",
+        lambda *args, **kwargs: [],
+    )
+
+    with pytest.raises(RuntimeError, match="still missing expected columns"):
+        repair_bronze_years(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            years=[2006],
+            expected_columns={"YEAR", "AGE", "SEX", "EDUC"},
+            dictionaries_dir=reference_dir,
+        )

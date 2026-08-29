@@ -22,6 +22,7 @@ from src.parsers.ipums import (
     build_and_save_variable_dictionary,
     merge_variables_into_bronze,
     parse_to_bronze,
+    prune_variable_dictionary,
 )
 from src.schemas.bronze.ipums_long import bronze_column_deviations, modal_columns
 
@@ -406,5 +407,130 @@ def parse_ipums_extracts(
         "ipums_parse_pipeline_complete",
         n_bronze_paths=len(bronze_paths),
         n_deviating_years=len(deviations),
+    )
+    return bronze_paths
+
+
+def check_bronze_columns(
+    bronze_dir: Path,
+    collection: str,
+    expected_columns: Collection[str] | None = None,
+) -> dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Report the bronze years that do not hold every expected column.
+
+    Args:
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection to check (e.g. "cps").
+        expected_columns (Collection[str] | None):
+            The column set every year is meant to hold. None derives it from
+            the years already in bronze.
+
+    Returns:
+        dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
+            {year: (missing, extra)} for deviating years only, empty when
+            every year conforms.
+    """
+    observed = bronze_columns_by_year(bronze_dir, collection)
+    expected = (
+        frozenset(expected_columns)
+        if expected_columns is not None
+        else modal_columns(observed)
+    )
+    return bronze_column_deviations(observed, expected)
+
+
+def repair_bronze_years(
+    external_dir: Path,
+    bronze_dir: Path,
+    collection: str,
+    years: Collection[int] | None = None,
+    expected_columns: Collection[str] | None = None,
+    dictionaries_dir: Path | None = None,
+) -> list[Path]:
+    """Rebuild bronze years that are missing expected columns, from the
+    extracts already on disk.
+
+    Re-parses the targeted years with overwriting permitted, so the entries
+    that built them originally are replayed in order. The column guard stays
+    armed throughout, so an entry carrying columns outside the expected set -
+    the kind that damages a year rather than filling it - is still refused.
+
+    Args:
+        external_dir (Path):
+            The path to the raw extracts.
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection to repair (e.g. "cps").
+        years (Collection[int] | None):
+            The years to rebuild. None targets every deviating year.
+        expected_columns (Collection[str] | None):
+            The column set every year is meant to hold. None derives it from
+            the years already in bronze.
+        dictionaries_dir (Path | None):
+            A path to the collection's variable dictionaries. None uses
+            data/reference/ipums/<collection>.
+
+    Returns:
+        list[Path]:
+            The bronze files rewritten, empty when nothing needed repair.
+
+    Raises:
+        RuntimeError:
+            A targeted year still lacks expected columns afterwards.
+    """
+    if dictionaries_dir is None:
+        dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
+
+    observed = bronze_columns_by_year(bronze_dir, collection)
+    expected = (
+        frozenset(expected_columns)
+        if expected_columns is not None
+        else modal_columns(observed)
+    )
+    targets = (
+        set(years)
+        if years is not None
+        else set(bronze_column_deviations(observed, expected))
+    )
+    if not targets:
+        log.info(
+            "ipums_bronze_repair_skipped", collection=collection, reason="no_years"
+        )
+        return []
+
+    log.info("ipums_bronze_repair_start", collection=collection, years=sorted(targets))
+    bronze_paths = parse_ipums_extracts(
+        external_dir,
+        bronze_dir,
+        collection,
+        dictionaries_dir=dictionaries_dir,
+        replace=True,
+        years=targets,
+        expected_columns=expected,
+    )
+
+    repaired = bronze_columns_by_year(bronze_dir, collection)
+    # The dictionaries were unioned again while re-parsing, so they can still
+    # describe variables the rebuilt year does not have.
+    for year in sorted(targets):
+        if year in repaired:
+            prune_variable_dictionary(dictionaries_dir, year, repaired[year])
+
+    still_deviating = sorted(
+        set(bronze_column_deviations(repaired, expected)) & targets
+    )
+    if still_deviating:
+        raise RuntimeError(
+            f"Repair left {collection!r} years {still_deviating} still missing "
+            f"expected columns - the extracts on disk do not cover them"
+        )
+    log.info(
+        "ipums_bronze_repair_complete",
+        collection=collection,
+        years=sorted(targets),
+        n_bronze_paths=len(bronze_paths),
     )
     return bronze_paths
