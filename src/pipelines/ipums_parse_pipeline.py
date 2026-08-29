@@ -147,9 +147,9 @@ def _refusal_reason(
         entry_columns (set[str]):
             The columns this entry would write.
         coverage_years (set[int]):
-            The entry's years that are already in parquet files.
+            Every year that already has a bronze parquet, collection-wide.
         sample_years (set[int]):
-            The entry years that are in metadata (sample name strings).
+            The years this entry's sample ids name. Empty when none parsed.
         expected (frozenset[str]):
             The column set every year is meant to hold.
         summary_known (bool):
@@ -164,20 +164,14 @@ def _refusal_reason(
     years_already_in_bronze = sample_years & coverage_years
 
     if not sample_years:
-        # Don't refuse if it is in metadata but not in parquet files
         return None if not coverage_years else "unknown years"
     if not years_already_in_bronze:
-        # Refuse because it already exists (both metadata and parquet files)
         return None
     if not summary_known:
-        # Columns fell back to the requested list, which omits the flag and
-        # technical columns IPUMS adds. Unknown is not the same as safe.
         return "unknown_columns"
     if expected and entry_columns - expected:
-        # Flag if there are completely new columns on top of existing ones.
         return "unexpected_columns"
     if not replace:
-        # Refuse if data already exists, and no flag to replace
         return "bronze_year_exists"
     return None
 
@@ -317,6 +311,7 @@ def parse_ipums_extracts(
                 years=years_filter,
             )
         else:
+            # Reminder:
             # sample years - years that metadata claims to provide
             # coverage years - years that are in parquet files
             # years already in bronze - intersection (claimed and exist in files)
@@ -351,13 +346,15 @@ def parse_ipums_extracts(
                     replace=replace,
                     years=years_filter,
                 )
-            except FileExistsError:
+            except FileExistsError as exc:
                 # Just log that file and continue, don't raise
                 log.warning(
                     "ipums_parse_entry_refused",
                     collection=collection,
                     extract_id=extract_id,
-                    reason="bronze_year_exists",
+                    reason="bronze_year_unseen",
+                    years=sorted(sample_years),
+                    error=str(exc),
                 )
                 continue
 

@@ -23,6 +23,20 @@ from src.pipelines.ipums_parse_pipeline import (
 _EXPECTED = frozenset({"YEAR", "AGE", "SEX"})
 
 
+def test_refusal_reason_blocks_overwriting_an_existing_year() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "AGE"},
+            coverage_years={2006},
+            sample_years={2006},
+            expected=_EXPECTED,
+            summary_known=True,
+            replace=False,
+        )
+        == "bronze_year_exists"
+    )
+
+
 def test_refusal_reason_allows_a_year_that_has_no_bronze_yet() -> None:
     assert (
         _refusal_reason(
