@@ -7,9 +7,11 @@ re-download:
     uv run python -m src.jobs.ipums_bronze repair --year 2006
 """
 
+from collections.abc import Collection
+
 import click
 
-from src.config.parsing import describe_columns, load_collection_expected_columns
+from src.config.parsing import load_collection_expected_columns
 from src.config.settings import settings
 from src.pipelines.ipums_parse_pipeline import (
     bronze_columns_by_year,
@@ -28,6 +30,13 @@ def _columns_line(columns: tuple[str, ...]) -> str:
         return ", ".join(columns)
     shown = ", ".join(columns[:_MAX_LISTED_COLUMNS])
     return f"{shown}, ... (+{len(columns) - _MAX_LISTED_COLUMNS} more)"
+
+
+def describe_columns(columns: Collection[str] | None) -> str:
+    """Short human-readable summary of a contract, for CLI output."""
+    if columns is None:
+        return "derived from bronze"
+    return f"{len(columns)} declared column(s)"
 
 
 def _expected_columns(collection: str) -> frozenset[str] | None:
