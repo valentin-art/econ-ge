@@ -565,6 +565,7 @@ def repair_bronze_years(
 
     # A year with no readable parquet is absent from `repaired`, not deviating
     # in it, so bronze_column_deviations alone would certify it as repaired.
+    deviations = bronze_column_deviations(repaired, expected)
     still_deviating = sorted(
         (
             set(bronze_column_deviations(repaired, expected))
@@ -573,7 +574,6 @@ def repair_bronze_years(
         & targets
     )
     if still_deviating:
-        deviations = bronze_column_deviations(repaired, expected)
         detail = []
         for year in still_deviating:
             # A year absent from `repaired` has no readable parquet at all, so
