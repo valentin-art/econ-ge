@@ -452,10 +452,15 @@ def repair_bronze_years(
     """Rebuild bronze years that are missing expected columns, from the
     extracts already on disk.
 
-    Re-parses the targeted years with overwriting permitted, so the entries
-    that built them originally are replayed in order. The column guard stays
-    armed throughout, so an entry carrying columns outside the expected set -
-    the kind that damages a year rather than filling it - is still refused.
+    Re-parses the targeted years with overwriting permitted: every manifest
+    entry covering them is replayed in manifest order, last writer wins. The
+    column guard stays armed throughout, so an entry carrying columns outside
+    the expected set - the kind that damages a year rather than filling it -
+    is still refused.
+
+    An entry whose columns are a subset of the expected set is not: it can
+    leave a year narrower than the entry before it, and only the post-repair
+    check below catches that.
 
     Args:
         external_dir (Path):
@@ -479,7 +484,9 @@ def repair_bronze_years(
 
     Raises:
         RuntimeError:
-            A targeted year still lacks expected columns afterwards.
+            A targeted year still lacks expected columns afterwards, or - from
+            parse_ipums_extracts - no manifest entry for `collection` is still
+            backed by files on disk.
     """
     if dictionaries_dir is None:
         dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
@@ -522,7 +529,10 @@ def repair_bronze_years(
     # A year with no readable parquet is absent from `repaired`, not deviating
     # in it, so bronze_column_deviations alone would certify it as repaired.
     still_deviating = sorted(
-        (set(bronze_column_deviations(repaired, expected)) | (targets - repaired.keys()))
+        (
+            set(bronze_column_deviations(repaired, expected))
+            | (targets - repaired.keys())
+        )
         & targets
     )
     if still_deviating:
