@@ -4,7 +4,7 @@ transforms and stores it into bronze-layer parquet files.
 Also builds and saves each extract's DDI-derived JSON variable dictionary.
 """
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import structlog
@@ -22,6 +22,7 @@ from src.parsers.ipums import (
     build_and_save_variable_dictionary,
     merge_variables_into_bronze,
     parse_to_bronze,
+    prune_variable_dictionary,
 )
 from src.schemas.bronze.ipums_long import bronze_column_deviations, modal_columns
 
@@ -82,6 +83,24 @@ def _collection_manifest_entries(external_dir: Path, collection: str) -> list[di
         key=lambda e: e["metadata"].get("request_kind", "new_samples") != "new_samples"
     )
     return entries
+
+
+def _deviation_detail(
+    years: list[int],
+    repaired: Mapping[int, Collection[str]],
+    deviations: Mapping[int, tuple[tuple[str, ...], tuple[str, ...]]],
+) -> str:
+    """One line per year for the repair failure message."""
+    parts = []
+    for year in years:
+        # Absent from `repaired` means no readable parquet at all, so the year
+        # reached still_deviating via targets - repaired.keys(), not deviations.
+        if year not in repaired:
+            parts.append(f"{year}: no bronze file")
+            continue
+        missing, extra = deviations[year]
+        parts.append(f"{year}: missing {list(missing)}, extra {list(extra)}")
+    return "; ".join(parts)
 
 
 def _entry_needs_processing(
@@ -176,6 +195,27 @@ def _refusal_reason(
     return None
 
 
+def _resolve_expected(
+    observed: Mapping[int, Collection[str]], expected_columns: Collection[str] | None
+) -> frozenset[str]:
+    """The declared expected column set, or the modal one derived from bronze.
+
+    Raises:
+        ValueError:
+            `expected_columns` is declared but empty. It cannot constrain
+            anything: _refusal_reason's column gate (`if expected and ...`)
+            goes dead and every year trivially conforms.
+    """
+    if expected_columns is None:
+        return modal_columns(observed)
+
+    if not expected_columns:
+        raise ValueError(
+            "expected_columns is empty - pass None to derive the set from bronze"
+        )
+    return frozenset(expected_columns)
+
+
 def parse_ipums_extracts(
     external_dir: Path,
     bronze_dir: Path,
@@ -217,6 +257,8 @@ def parse_ipums_extracts(
             A list of paths with bronze data for a given collection.
 
     Raises:
+         ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
         RuntimeError:
             No usable manifest entry for `collection` is backed by files on
             disk. Nothing is written.
@@ -239,11 +281,11 @@ def parse_ipums_extracts(
     coverage = bronze_columns_by_year(bronze_dir, collection)
     # Frozen for the whole run, so an entry that shrinks a year partway
     # through cannot move the target the later entries are judged against.
-    expected = (
-        frozenset(expected_columns)
-        if expected_columns is not None
-        else modal_columns(coverage)
+    expected = _resolve_expected(
+        observed=coverage,
+        expected_columns=expected_columns,
     )
+
     years_filter = set(years) if years is not None else None
 
     for entry in entries:
@@ -406,5 +448,162 @@ def parse_ipums_extracts(
         "ipums_parse_pipeline_complete",
         n_bronze_paths=len(bronze_paths),
         n_deviating_years=len(deviations),
+    )
+    return bronze_paths
+
+
+def check_bronze_columns(
+    bronze_dir: Path,
+    collection: str,
+    expected_columns: Collection[str] | None = None,
+) -> dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Report the bronze years that do not hold every expected column.
+
+    Args:
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection to check (e.g. "cps").
+        expected_columns (Collection[str] | None):
+            The column set every year is meant to hold. None derives it from
+            the years already in bronze.
+
+    Returns:
+        dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
+            {year: (missing, extra)} for deviating years only, empty when
+            every year conforms.
+
+    Raises:
+        ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
+    """
+    observed = bronze_columns_by_year(bronze_dir, collection)
+    expected = _resolve_expected(
+        observed=observed,
+        expected_columns=expected_columns,
+    )
+
+    return bronze_column_deviations(observed, expected)
+
+
+def repair_bronze_years(
+    external_dir: Path,
+    bronze_dir: Path,
+    collection: str,
+    years: Collection[int] | None = None,
+    expected_columns: Collection[str] | None = None,
+    dictionaries_dir: Path | None = None,
+) -> list[Path]:
+    """Rebuild bronze years that are missing expected columns, from the
+    extracts already on disk.
+
+    Re-parses the targeted years with overwriting permitted: every manifest
+    entry covering them is replayed in manifest order, last writer wins. The
+    column guard stays armed throughout, so an entry carrying columns outside
+    the expected set - the kind that damages a year rather than filling it -
+    is still refused.
+
+    An entry whose columns are a subset of the expected set is not: it can
+    leave a year narrower than the entry before it, and only the post-repair
+    check below catches that.
+
+    Args:
+        external_dir (Path):
+            The path to the raw extracts.
+        bronze_dir (Path):
+            The bronze root; the collection directory is appended.
+        collection (str):
+            The IPUMS collection to repair (e.g. "cps").
+        years (Collection[int] | None):
+            The years to rebuild. None targets every deviating year.
+        expected_columns (Collection[str] | None):
+            The column set every year is meant to hold. None derives it from
+            the years already in bronze - modal, so it collapses onto the
+            damaged shape when most years are damaged. Declare it explicitly
+            for a repair over a collection you know to be widely broken.
+        dictionaries_dir (Path | None):
+            A path to the collection's variable dictionaries. None uses
+            data/reference/ipums/<collection>.
+
+    Returns:
+        list[Path]:
+            The bronze files rewritten, empty when nothing needed repair.
+
+    Raises:
+        ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
+        RuntimeError:
+            A targeted year still lacks expected columns afterwards, or - from
+            parse_ipums_extracts - no manifest entry for `collection` is still
+            backed by files on disk.
+    """
+    if dictionaries_dir is None:
+        dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
+
+    observed = bronze_columns_by_year(bronze_dir, collection)
+    expected = _resolve_expected(
+        observed=observed,
+        expected_columns=expected_columns,
+    )
+
+    targets = (
+        set(years)
+        if years is not None
+        else set(bronze_column_deviations(observed, expected))
+    )
+    if not targets:
+        log.info(
+            "ipums_bronze_repair_skipped",
+            collection=collection,
+            reason="empty_years_argument"
+            if years is not None
+            else ("no_bronze" if not observed else "all_years_conform"),
+        )
+        return []
+
+    log.info(
+        "ipums_bronze_repair_start",
+        collection=collection,
+        years=sorted(targets),
+        expected=sorted(expected),
+        expected_source="declared" if expected_columns is not None else "modal",
+    )
+    bronze_paths = parse_ipums_extracts(
+        external_dir,
+        bronze_dir,
+        collection,
+        dictionaries_dir=dictionaries_dir,
+        replace=True,
+        years=targets,
+        expected_columns=expected,
+    )
+
+    repaired = bronze_columns_by_year(bronze_dir, collection)
+    # The dictionaries were unioned again while re-parsing, so they can still
+    # describe variables the rebuilt year does not have.
+    for year in sorted(targets):
+        if year in repaired:
+            prune_variable_dictionary(dictionaries_dir, year, repaired[year])
+
+    # A year with no readable parquet is absent from `repaired`, not deviating
+    # in it, so bronze_column_deviations alone would certify it as repaired.
+    deviations = bronze_column_deviations(repaired, expected)
+    still_deviating = sorted((set(deviations) | (targets - repaired.keys())) & targets)
+    if still_deviating:
+        detail = _deviation_detail(
+            years=still_deviating,
+            repaired=repaired,
+            deviations=deviations,
+        )
+        raise RuntimeError(
+            f"Repair left {collection!r} years deviating from the expected columns "
+            f"{sorted(expected)} - {detail}. Either no extract on disk "
+            f"covers them, or a later manifest entry rewrote the year narrower."
+        )
+    log.info(
+        "ipums_bronze_repair_complete",
+        collection=collection,
+        years=sorted(targets),
+        n_bronze_paths=len(bronze_paths),
     )
     return bronze_paths
