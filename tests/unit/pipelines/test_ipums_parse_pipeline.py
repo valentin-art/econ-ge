@@ -24,60 +24,115 @@ _EXPECTED = frozenset({"YEAR", "AGE", "SEX"})
 
 
 def test_refusal_reason_allows_a_year_that_has_no_bronze_yet() -> None:
-    # Bootstrap: nothing to protect, so the guard stays out of the way even
-    # for an entry whose columns are nothing like the expected set.
     assert (
         _refusal_reason(
-            {"YEAR", "WTFINL"}, set(), _EXPECTED, summary_known=True, replace=False
-        )
-        is None
-    )
-
-
-def test_refusal_reason_blocks_overwriting_an_existing_year() -> None:
-    assert (
-        _refusal_reason(
-            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=True, replace=False
-        )
-        == "bronze_year_exists"
-    )
-
-
-def test_refusal_reason_allows_a_conforming_entry_under_replace() -> None:
-    # The repair path: the full extract may rewrite a damaged year because
-    # everything it carries belongs to the expected set.
-    assert (
-        _refusal_reason(
-            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=True, replace=True
-        )
-        is None
-    )
-
-
-def test_refusal_reason_blocks_unexpected_columns_even_under_replace() -> None:
-    # The cps2006_09s rule. Repairing a year needs replace=True, and that
-    # same run still has to refuse the wrong-grain entry that damaged it.
-    assert (
-        _refusal_reason(
-            {"YEAR", "AGE", "WTFINL"},
-            {2006},
-            _EXPECTED,
+            entry_columns={"YEAR", "WTFINL"},
+            coverage_years=set(),
+            sample_years=set(),
+            expected=_EXPECTED,
             summary_known=True,
-            replace=True,
+            replace=False,
+        )
+        is None
+    )
+
+
+def test_refusal_reason_blocks_a_year_is_in_coverage_but_not_in_sample_years() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "WTFINL"},
+            coverage_years={2006},
+            sample_years=set(),
+            expected=_EXPECTED,
+            summary_known=True,
+            replace=False,
+        )
+        == "unknown years"
+    )
+
+
+def test_refusal_reason_allows_a_year_if_a_year_in_sample_but_not_coverage() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "WTFINL"},
+            coverage_years=set(),
+            sample_years={2006},
+            expected=_EXPECTED,
+            summary_known=True,
+            replace=False,
+        )
+        is None
+    )
+
+
+def test_refusal_reason_blocks_if_a_column_is_unknown() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "AGE"},
+            coverage_years={2006},
+            sample_years={2006},
+            expected=_EXPECTED,
+            summary_known=False,
+            replace=False,
+        )
+        == "unknown_columns"
+    )
+
+
+def test_refusal_reason_blocks_if_a_column_is_unexpected() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "WTFINL"},
+            coverage_years={2006},
+            sample_years={2006},
+            expected=_EXPECTED,
+            summary_known=True,
+            replace=False,
         )
         == "unexpected_columns"
     )
 
 
-def test_refusal_reason_blocks_an_entry_whose_columns_are_unknown() -> None:
-    # An unreadable DDI leaves the column list as the requested variables,
-    # which omits the flag columns IPUMS adds - so it can look conforming
-    # while carrying anything.
+def test_refusal_reason_does_not_block_if_no_expected_columns() -> None:
     assert (
         _refusal_reason(
-            {"YEAR", "AGE"}, {2006}, _EXPECTED, summary_known=False, replace=True
+            entry_columns={"YEAR", "AGE"},
+            coverage_years={2006},
+            sample_years={2006},
+            expected=frozenset(),
+            summary_known=True,
+            replace=True,
         )
-        == "unknown_columns"
+        is None
+    )
+
+
+def test_refusal_reason_does_not_block_if_no_entry_and_expected_columns() -> None:
+    # inferior case
+    assert (
+        _refusal_reason(
+            entry_columns=set(),
+            coverage_years={2006},
+            sample_years={2006},
+            expected=frozenset(),
+            summary_known=True,
+            replace=True,
+        )
+        is None
+    )
+
+
+def test_refusal_reason_allows_a_conforming_entry_under_replace() -> None:
+    assert (
+        _refusal_reason(
+            entry_columns={"YEAR", "AGE"},
+            coverage_years={2006},
+            sample_years={2006},
+            expected=_EXPECTED,
+            summary_known=True,
+            replace=True,
+        )
+        is None
     )
 
 

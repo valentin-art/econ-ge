@@ -122,7 +122,8 @@ def _entry_needs_processing(
 
 def _refusal_reason(
     entry_columns: set[str],
-    existing_years: set[int],
+    coverage_years: set[int],
+    sample_years: set[int],
     expected: frozenset[str],
     summary_known: bool,
     replace: bool,
@@ -145,8 +146,10 @@ def _refusal_reason(
     Args:
         entry_columns (set[str]):
             The columns this entry would write.
-        existing_years (set[int]):
-            The entry's years that already have a bronze file.
+        coverage_years (set[int]):
+            The entry's years that are already in parquet files.
+        sample_years (set[int]):
+            The entry years that are in metadata (sample name strings).
         expected (frozenset[str]):
             The column set every year is meant to hold.
         summary_known (bool):
@@ -158,15 +161,23 @@ def _refusal_reason(
         str | None:
             A reason to log and skip, or None to write the entry.
     """
-    if not existing_years:
+    years_already_in_bronze = sample_years & coverage_years
+
+    if not sample_years:
+        # Don't refuse if it is in metadata but not in parquet files
+        return None if not coverage_years else "unknown years"
+    if not years_already_in_bronze:
+        # Refuse because it already exists (both metadata and parquet files)
         return None
     if not summary_known:
         # Columns fell back to the requested list, which omits the flag and
         # technical columns IPUMS adds. Unknown is not the same as safe.
         return "unknown_columns"
-    if entry_columns - expected:
+    if expected and entry_columns - expected:
+        # Flag if there are completely new columns on top of existing ones.
         return "unexpected_columns"
     if not replace:
+        # Refuse if data already exists, and no flag to replace
         return "bronze_year_exists"
     return None
 
@@ -305,21 +316,26 @@ def parse_ipums_extracts(
                 years=years_filter,
             )
         else:
-            existing_years = sample_years & set(coverage)
+            # sample years - years that metadata claims to provide
+            # coverage years - years that are in parquet files
+            # years already in bronze - intersection (claimed and exist in files)
+            coverage_years = set(coverage)
             refusal = _refusal_reason(
-                variables,
-                existing_years,
-                expected,
-                summary is not None,
-                replace,
+                entry_columns=variables,
+                coverage_years=coverage_years,
+                sample_years=sample_years,
+                expected=expected,
+                summary_known=summary is not None,
+                replace=replace,
             )
             if refusal is not None:
+                years_already_in_bronze = sample_years & coverage_years
                 log.warning(
                     "ipums_parse_entry_refused",
                     collection=collection,
                     extract_id=extract_id,
                     reason=refusal,
-                    years=sorted(existing_years),
+                    years=sorted(years_already_in_bronze),
                     unexpected=sorted(variables - expected),
                 )
                 continue
