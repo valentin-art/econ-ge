@@ -9,6 +9,8 @@ from src.config.parsing import (
     parsing_config_path,
 )
 
+PARSING_CONFIG_ROOT = Path(__file__).parents[3] / "config" / "parsing"
+
 
 def _write_config(root: Path, payload: dict) -> Path:
     path = parsing_config_path(root, "ipums", "cps")
@@ -67,10 +69,13 @@ def test_load_collection_expected_columns_uses_the_conventional_path(
 def test_shipped_cps_config_matches_what_the_pipeline_expects() -> None:
     # The committed contract must stay loadable and non-empty: a typo here
     # silently changes what every parse run treats as damage.
-    from src.config.settings import settings
 
-    columns = load_collection_expected_columns(
-        settings.parsing_config_root, "ipums", "cps"
-    )
+    columns = load_collection_expected_columns(PARSING_CONFIG_ROOT, "ipums", "cps")
     assert columns is not None
     assert {"YEAR", "AGE", "SEX", "INCWAGE"} <= columns
+
+
+def test_settings_default_points_at_the_shipped_parsing_config() -> None:
+    from src.config.settings import Settings
+
+    assert Settings().parsing_config_root == PARSING_CONFIG_ROOT
