@@ -123,14 +123,17 @@ def repair(collection: str, years: tuple[int, ...], dry_run: bool) -> None:
             f"against {describe_columns(expected)}."
         )
         return
+    try:
+        bronze_paths = repair_bronze_years(
+            external_dir,
+            bronze_dir,
+            collection,
+            years=targets,
+            expected_columns=expected,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    bronze_paths = repair_bronze_years(
-        external_dir,
-        bronze_dir,
-        collection,
-        years=targets,
-        expected_columns=expected,
-    )
     click.echo(
         f"{collection}: rebuilt {len(bronze_paths)} bronze file(s) for {targets}."
     )
