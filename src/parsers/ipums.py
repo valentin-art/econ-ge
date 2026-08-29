@@ -167,6 +167,51 @@ def save_variable_dictionary(
     return out_path
 
 
+def prune_variable_dictionary(
+    dictionaries_dir: Path, year: int, columns: Collection[str]
+) -> Path | None:
+    """Drop a year's dictionary entries for variables outside `columns`.
+
+    The counterweight to save_variable_dictionary's union: a year's
+    dictionary keeps every variable ever documented for it, so after a year
+    is rewritten from a different set of extracts it can still describe
+    variables that year no longer has.
+
+    Args:
+        dictionaries_dir (Path):
+            The collection-scoped dictionary directory.
+        year (int):
+            The year whose dictionary to prune.
+        columns (Collection[str]):
+            The variables to keep.
+
+    Returns:
+        Path | None:
+            The rewritten dictionary, or None if there was no file or
+            nothing to remove.
+    """
+    out_path = variable_dictionary_path(dictionaries_dir, year)
+    if not out_path.exists():
+        return None
+    existing = load_variable_dictionary(dictionaries_dir, year)
+    keep = set(columns)
+    removed = sorted(set(existing) - keep)
+    if not removed:
+        return None
+    pruned = {name: entry for name, entry in existing.items() if name in keep}
+    log.warning(
+        "ipums_variable_dictionary_pruned",
+        year=year,
+        removed=removed,
+        n_kept=len(pruned),
+    )
+    out_path.write_text(
+        json.dumps(pruned, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return out_path
+
+
 def load_variable_dictionary(
     dictionaries_dir: Path, year: int
 ) -> dict[str, dict[str, object]]:

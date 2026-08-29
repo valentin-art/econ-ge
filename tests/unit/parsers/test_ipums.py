@@ -21,6 +21,7 @@ from src.parsers.ipums import (
     merge_variables_into_bronze,
     parse_ipums_extract,
     parse_to_bronze,
+    prune_variable_dictionary,
     save_variable_dictionary,
     variable_dictionary_path,
 )
@@ -1153,3 +1154,48 @@ def test_bronze_columns_by_year_survives_a_pandas_index_file(tmp_path: Path) -> 
     assert set(columns) == {2005, 2006}
     assert columns[2006] == {"YEAR"}
     assert columns[2005] == {"YEAR", "SEX"}
+
+
+# --- prune_variable_dictionary --------------------------------------------------
+
+
+def test_prune_variable_dictionary_removes_only_unbacked_entries(
+    tmp_path: Path,
+) -> None:
+    save_variable_dictionary(
+        {name: {"Description": name} for name in ("YEAR", "AGE", "WTFINL")},
+        tmp_path,
+        2006,
+    )
+
+    out_path = prune_variable_dictionary(tmp_path, 2006, ["YEAR", "AGE"])
+
+    assert out_path == variable_dictionary_path(tmp_path, 2006)
+    assert set(load_variable_dictionary(tmp_path, 2006)) == {"YEAR", "AGE"}
+
+
+def test_prune_variable_dictionary_is_a_noop_when_nothing_to_remove(
+    tmp_path: Path,
+) -> None:
+    save_variable_dictionary({"AGE": {"Description": "Age"}}, tmp_path, 2006)
+
+    assert prune_variable_dictionary(tmp_path, 2006, ["AGE", "SEX"]) is None
+    assert set(load_variable_dictionary(tmp_path, 2006)) == {"AGE"}
+
+
+def test_prune_variable_dictionary_returns_none_when_year_has_no_dictionary(
+    tmp_path: Path,
+) -> None:
+    assert prune_variable_dictionary(tmp_path, 2006, ["AGE"]) is None
+
+
+def test_prune_variable_dictionary_logs_what_it_removed(tmp_path: Path) -> None:
+    save_variable_dictionary(
+        {name: {"Description": name} for name in ("AGE", "WTFINL")}, tmp_path, 2006
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        prune_variable_dictionary(tmp_path, 2006, ["AGE"])
+
+    assert [log["event"] for log in logs] == ["ipums_variable_dictionary_pruned"]
+    assert logs[0]["removed"] == ["WTFINL"]
