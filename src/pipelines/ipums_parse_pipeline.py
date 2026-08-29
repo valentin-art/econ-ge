@@ -432,12 +432,22 @@ def check_bronze_columns(
             {year: (missing, extra)} for deviating years only, empty when
             every year conforms.
     """
+    if expected_columns is not None and not expected_columns:
+        # Not equivalent to None: an empty set disarms _refusal_reason's column
+        # gate (`if expected and ...`) while making every year trivially
+        # conform, so a replace=True run would rewrite years unguarded and then
+        # certify the result.
+        raise ValueError(
+            "expected_columns is empty - pass None to derive the set from bronze"
+        )
+
     observed = bronze_columns_by_year(bronze_dir, collection)
     expected = (
         frozenset(expected_columns)
         if expected_columns is not None
         else modal_columns(observed)
     )
+
     return bronze_column_deviations(observed, expected)
 
 
@@ -493,12 +503,22 @@ def repair_bronze_years(
     if dictionaries_dir is None:
         dictionaries_dir = settings.paths.ipums_clean_dictionaries_dir(collection)
 
+    if expected_columns is not None and not expected_columns:
+        # Not equivalent to None: an empty set disarms _refusal_reason's column
+        # gate (`if expected and ...`) while making every year trivially
+        # conform, so a replace=True run would rewrite years unguarded and then
+        # certify the result.
+        raise ValueError(
+            "expected_columns is empty - pass None to derive the set from bronze"
+        )
+
     observed = bronze_columns_by_year(bronze_dir, collection)
     expected = (
         frozenset(expected_columns)
         if expected_columns is not None
         else modal_columns(observed)
     )
+
     targets = (
         set(years)
         if years is not None
