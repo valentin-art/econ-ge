@@ -12,8 +12,8 @@ the expected set from the years already in bronze, which is the right default
 for a collection whose shape nobody has had to pin down yet.
 """
 
+from collections import Counter
 from pathlib import Path
-from typing import Counter
 
 import structlog
 import yaml
@@ -27,7 +27,9 @@ def parsing_config_path(config_root: Path, source: str, collection: str) -> Path
     return config_root / source / f"{collection}.yaml"
 
 
-def load_expected_columns(path: Path) -> frozenset[str] | None:
+def load_expected_columns(
+    path: Path, expect_collection: str | None = None
+) -> frozenset[str] | None:
     """Read the expected bronze column set from a parsing config file.
 
     Args:
@@ -43,7 +45,7 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
     Raises:
         ValueError:
             The file exists but `expected_columns` is not a list of strings,
-            emtpy list, or it names the same column twice. A malformed contract
+            emptpy list, or it names the same column twice. A malformed contract
             must not quietly become a narrower one - that would refuse valid
             extracts and mark good years as damaged.
     """
@@ -57,6 +59,12 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
     if columns is None:
         return None
 
+    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raise ValueError(
+            f"Parsing config {path} has an 'expected_columns' that is not a "
+            f"list of strings"
+        )
+
     if not columns:
         raise ValueError(
             f"Parsing config {path} declares an empty 'expected_columns' - "
@@ -64,16 +72,18 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
             f"add columns"
         )
 
-    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
-        raise ValueError(
-            f"Parsing config {path} has an 'expected_columns' that is not a "
-            f"list of strings"
-        )
-
     duplicates = sorted(c for c, n in Counter(columns).items() if n > 1)
 
     if duplicates:
         raise ValueError(f"Parsing config {path} lists duplicate columns: {duplicates}")
+
+    if expect_collection is not None:
+        declared = payload.get("collection")
+        if declared is not None and declared != expect_collection:
+            raise ValueError(
+                f"Parsing config {path} declares collection {declared!r}, "
+                f"loaded as {expect_collection!r}"
+            )
     log.info(
         "ipums_parsing_config_loaded",
         path=str(path),
@@ -99,25 +109,8 @@ def load_collection_expected_columns(
     Returns:
         frozenset[str] | None
             A set of columns from parse config file if any. Otherwise, None.
-
-    Raises:
-        ValueError:
-            Collection in the parse config file is different from requested
-            collection.
     """
     path = parsing_config_path(config_root, source, collection)
-    columns = load_expected_columns(path)
+    columns = load_expected_columns(path, expect_collection=collection)
 
-    if columns is not None:
-        parse_config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        parse_config_collection = parse_config.get("collection")
-
-        if (
-            parse_config_collection is not None
-            and parse_config_collection != collection
-        ):
-            raise ValueError(
-                f"Parsing config {path} declares collection {parse_config_collection!r}"
-                f"loaded as {collection!r}"
-            )
     return columns

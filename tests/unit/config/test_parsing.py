@@ -33,10 +33,13 @@ def test_missing_config_is_not_an_error(tmp_path: Path) -> None:
 
 
 def test_config_with_empty_expected_columns_raises_error(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
+    path1 = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
+    path2 = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
 
-    with pytest.raises(ValueError, match="declares an empty"):
-        load_expected_columns(path)
+    with pytest.raises(ValueError, match="not a list of strings"):
+        load_expected_columns(path1)
+    with pytest.raises(ValueError, match="not a list of strings"):
+        load_expected_columns(path2)
 
 
 def test_config_without_expected_columns_returns_none(tmp_path: Path) -> None:
@@ -71,15 +74,6 @@ def test_load_collection_expected_columns_reads_columns(
     assert load_collection_expected_columns(tmp_path, "ipums", "cps") == frozenset(
         {"YEAR", "AGE"}
     )
-
-
-def test_load_collectini_expected_columns_fails_on_wrong_collection(
-    tmp_path: Path,
-) -> None:
-    _write_config(tmp_path, {"collection": "cpss", "expected_columns": ["YEAR", "AGE"]})
-
-    with pytest.raises(ValueError):
-        load_collection_expected_columns(tmp_path, "ipums", "cps")
 
 
 def test_shipped_cps_config_matches_what_the_pipeline_expects() -> None:

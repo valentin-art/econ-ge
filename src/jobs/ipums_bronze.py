@@ -13,8 +13,8 @@ import click
 
 from src.config.parsing import load_collection_expected_columns
 from src.config.settings import settings
+from src.parsers.ipums import bronze_columns_by_year
 from src.pipelines.ipums_parse_pipeline import (
-    bronze_columns_by_year,
     check_bronze_columns,
     repair_bronze_years,
 )
@@ -32,7 +32,7 @@ def _columns_line(columns: tuple[str, ...]) -> str:
     return f"{shown}, ... (+{len(columns) - _MAX_LISTED_COLUMNS} more)"
 
 
-def describe_columns(columns: Collection[str] | None) -> str:
+def _describe_columns(columns: Collection[str] | None) -> str:
     """Short human-readable summary of a contract, for CLI output."""
     if columns is None:
         return "derived from bronze"
@@ -59,7 +59,7 @@ def check(collection: str) -> None:
 
     bronze_dir = settings.paths.bronze / "ipums"
     expected = _expected_columns(collection)
-    click.echo(f"{collection}: contract is {describe_columns(expected)}.")
+    click.echo(f"{collection}: contract is {_describe_columns(expected)}.")
 
     observed = bronze_columns_by_year(bronze_dir, collection)
     if not observed:
@@ -129,7 +129,7 @@ def repair(collection: str, years: tuple[int, ...], dry_run: bool) -> None:
     if dry_run:
         click.echo(
             f"{collection}: would rebuild {targets} from {external_dir} "
-            f"against {describe_columns(expected)}."
+            f"against {_describe_columns(expected)}."
         )
         return
     try:
