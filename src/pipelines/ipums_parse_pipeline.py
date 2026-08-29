@@ -4,6 +4,7 @@ transforms and stores it into bronze-layer parquet files.
 Also builds and saves each extract's DDI-derived JSON variable dictionary.
 """
 
+from collections.abc import Collection
 from pathlib import Path
 
 import structlog
@@ -18,11 +19,11 @@ from src.extractors.ipums_ddi import (
 from src.extractors.manifest import read_manifest
 from src.parsers.ipums import (
     bronze_columns_by_year,
-    bronze_coverage,
     build_and_save_variable_dictionary,
     merge_variables_into_bronze,
     parse_to_bronze,
 )
+from src.schemas.bronze.ipums_long import bronze_column_deviations, modal_columns
 
 log = structlog.get_logger(__name__)
 
@@ -119,11 +120,71 @@ def _entry_needs_processing(
     return not all(variables <= coverage.get(year, set()) for year in sample_years)
 
 
+def _refusal_reason(
+    entry_columns: set[str],
+    coverage_years: set[int],
+    sample_years: set[int],
+    expected: frozenset[str],
+    summary_known: bool,
+    replace: bool,
+) -> str | None:
+    """Why a "new_samples" entry must not be written, or None to proceed.
+
+    A "new_samples" entry is written whole, so against a year that already has
+    bronze it replaces every column that year held. Two independent gates
+    gate that:
+
+      - `replace` covers overwriting at all, and is the operator's switch.
+      - the column gate covers changing the shape, and is deliberately left
+        armed under `replace`: restoring a year needs replace=True, and that
+        same run still has to refuse the entry that damaged it.
+
+    To widen the expected set on purpose, pass `expected_columns` explicitly.
+    There is no flag for it: `force` travels in the manifest from the
+    extractor, so reusing it would let one re-download disarm this for good.
+
+    Args:
+        entry_columns (set[str]):
+            The columns this entry would write.
+        coverage_years (set[int]):
+            Every year that already has a bronze parquet, collection-wide.
+        sample_years (set[int]):
+            The years this entry's sample ids name. Empty when none parsed.
+        expected (frozenset[str]):
+            The column set every year is meant to hold.
+        summary_known (bool):
+            Whether the entry's columns came from its DDI codebook.
+        replace (bool):
+            Whether overwriting an existing year is permitted.
+
+    Returns:
+        str | None:
+            A reason to log and skip, or None to write the entry.
+    """
+    years_already_in_bronze = sample_years & coverage_years
+
+    if not sample_years:
+        return None if not coverage_years else "unknown_years"
+    if not years_already_in_bronze:
+        return None
+    if not summary_known:
+        return "unknown_columns"
+    if expected and entry_columns - expected:
+        return "unexpected_columns"
+    if not replace:
+        return "bronze_year_exists"
+    return None
+
+
 def parse_ipums_extracts(
     external_dir: Path,
     bronze_dir: Path,
     collection: str,
     dictionaries_dir: Path | None = None,
+    *,
+    replace: bool = False,
+    years: Collection[int] | None = None,
+    expected_columns: Collection[str] | None = None,
 ) -> list[Path]:
     """Parse every already-downloaded IPUMS extract not yet reflected in bronze.
 
@@ -139,7 +200,17 @@ def parse_ipums_extracts(
         dictionaries_dir (Path | None):
             A path to dictionaries for data to parse. None uses
             data/reference/ipums/<collection>. Must match `collection` - a
-            mismatch reads and writes another collection's coverage silently.
+            mismatch reads and writes another collection's dictionaries
+            silently.
+        replace (bool):
+            Allow a "new_samples" entry to overwrite a year that already has
+            a bronze file.
+        years (Collection[int] | None):
+            Parse only these years. None parses every year the entries cover.
+        expected_columns (Collection[str] | None):
+            The column set every year is meant to hold, used to refuse an
+            entry that would reshape an existing year. None derives it from
+            the years already in bronze.
 
     Returns:
         list[Path]:
@@ -162,7 +233,18 @@ def parse_ipums_extracts(
             f"{collection!r} in {external_dir / collection} - run "
             f"extract_ipums_extracts first"
         )
-    coverage = bronze_coverage(dictionaries_dir)
+    # Read from the parquet files rather than the dictionaries: a dictionary
+    # accumulates and never shrinks, so it keeps listing columns a year has
+    # since lost and that year would never be reparsed.
+    coverage = bronze_columns_by_year(bronze_dir, collection)
+    # Frozen for the whole run, so an entry that shrinks a year partway
+    # through cannot move the target the later entries are judged against.
+    expected = (
+        frozenset(expected_columns)
+        if expected_columns is not None
+        else modal_columns(coverage)
+    )
+    years_filter = set(years) if years is not None else None
 
     for entry in entries:
         metadata = entry["metadata"]
@@ -193,6 +275,20 @@ def parse_ipums_extracts(
             if (year := parse_sample_year(sample)) is not None
         }
 
+        # Narrow before the coverage check, so a filtered run judges the
+        # entry only on the years it is allowed to touch. An entry with no
+        # parseable year keeps an empty set and stays fail-safe below.
+        if years_filter is not None and sample_years:
+            sample_years &= years_filter
+            if not sample_years:
+                log.info(
+                    "ipums_parse_entry_skipped",
+                    collection=collection,
+                    extract_id=extract_id,
+                    reason="outside_years_filter",
+                )
+                continue
+
         force = metadata.get("force", False)
         if not _entry_needs_processing(coverage, sample_years, variables, force=force):
             log.info(
@@ -203,6 +299,8 @@ def parse_ipums_extracts(
             continue
 
         if request_kind == "variable_delta":
+            # A delta only ever adds columns, so it cannot reshape a year and
+            # is not subject to the guard below.
             touched_paths = merge_variables_into_bronze(
                 data_path,
                 ddi_path,
@@ -210,28 +308,59 @@ def parse_ipums_extracts(
                 bronze_dir,
                 new_variables=entry_columns,
                 force=force,
+                years=years_filter,
             )
         else:
-            # Explicitly wholesale, matching what this call has always done:
-            # parse_to_bronze rewrites every year the extract covers, including
-            # years already in bronze.
-            before_columns = bronze_columns_by_year(bronze_dir, collection)
-            touched_paths = parse_to_bronze(
-                data_path, ddi_path, collection, bronze_dir, replace=True
+            # Reminder:
+            # sample years - years that metadata claims to provide
+            # coverage years - years that are in parquet files
+            # years already in bronze - intersection (claimed and exist in files)
+            coverage_years = set(coverage)
+            refusal = _refusal_reason(
+                entry_columns=variables,
+                coverage_years=coverage_years,
+                sample_years=sample_years,
+                expected=expected,
+                summary_known=summary is not None,
+                replace=replace,
             )
-            after_columns = bronze_columns_by_year(bronze_dir, collection)
+            if refusal is not None:
+                years_already_in_bronze = sample_years & coverage_years
+                log.warning(
+                    "ipums_parse_entry_refused",
+                    collection=collection,
+                    extract_id=extract_id,
+                    reason=refusal,
+                    years=sorted(years_already_in_bronze),
+                    unexpected=sorted(variables - expected)
+                    if refusal == "unexpected_columns"
+                    else None,
+                )
+                continue
+            try:
+                touched_paths = parse_to_bronze(
+                    data_path,
+                    ddi_path,
+                    collection,
+                    bronze_dir,
+                    replace=replace,
+                    years=years_filter,
+                )
+            except FileExistsError as exc:
+                # Just log that file and continue, don't raise
+                log.warning(
+                    "ipums_parse_entry_refused",
+                    collection=collection,
+                    extract_id=extract_id,
+                    reason="bronze_year_unseen",
+                    years=sorted(sample_years),
+                    error=str(exc),
+                )
+                continue
 
-            for year in sorted(int(p.stem) for p in touched_paths):
-                lost = before_columns.get(year, set()) - after_columns.get(year, set())
-                if lost:
-                    log.warning(
-                        "ipums_bronze_year_narrowed",
-                        collection=collection,
-                        extract_id=extract_id,
-                        year=year,
-                        n_lost=len(lost),
-                        lost_columns=sorted(lost),
-                    )
+        if not touched_paths:
+            continue
+
         bronze_paths.extend(touched_paths)
         log.info(
             "ipums_parse_entry_complete",
@@ -249,11 +378,33 @@ def parse_ipums_extracts(
             touched_years,
             force=force,
             # A delta merge only wrote its own columns, so the dictionary
-            # must not claim the rest of the codebook - bronze_coverage
-            # reads these files as the record of what bronze holds.
+            # must not claim the rest of the codebook.
             variables=entry_columns if request_kind == "variable_delta" else None,
         )
         for year in touched_years:
-            coverage.setdefault(year, set()).update(variables)
-    log.info("ipums_parse_pipeline_complete", n_bronze_paths=len(bronze_paths))
+            if request_kind == "variable_delta":
+                coverage.setdefault(year, set()).update(variables)
+            else:
+                # A wholesale rewrite replaces the year, so coverage has to
+                # shrink with it. Union here would leave every delta that
+                # once filled this year looking already-covered, and the
+                # columns the rewrite dropped would never come back.
+                coverage[year] = set(variables)
+
+    deviations = bronze_column_deviations(
+        bronze_columns_by_year(bronze_dir, collection), expected
+    )
+    for year, (missing, extra) in deviations.items():
+        log.warning(
+            "ipums_bronze_column_deviation",
+            collection=collection,
+            year=year,
+            missing=list(missing),
+            extra=list(extra),
+        )
+    log.info(
+        "ipums_parse_pipeline_complete",
+        n_bronze_paths=len(bronze_paths),
+        n_deviating_years=len(deviations),
+    )
     return bronze_paths
