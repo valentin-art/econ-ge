@@ -512,7 +512,13 @@ def repair_bronze_years(
         )
         return []
 
-    log.info("ipums_bronze_repair_start", collection=collection, years=sorted(targets))
+    log.info(
+        "ipums_bronze_repair_start",
+        collection=collection,
+        years=sorted(targets),
+        expected=sorted(expected),
+        expected_source="declared" if expected_columns is not None else "modal",
+    )
     bronze_paths = parse_ipums_extracts(
         external_dir,
         bronze_dir,
