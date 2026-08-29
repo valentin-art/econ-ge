@@ -519,8 +519,11 @@ def repair_bronze_years(
         if year in repaired:
             prune_variable_dictionary(dictionaries_dir, year, repaired[year])
 
+    # A year with no readable parquet is absent from `repaired`, not deviating
+    # in it, so bronze_column_deviations alone would certify it as repaired.
     still_deviating = sorted(
-        set(bronze_column_deviations(repaired, expected)) & targets
+        (set(bronze_column_deviations(repaired, expected)) | (targets - repaired.keys()))
+        & targets
     )
     if still_deviating:
         raise RuntimeError(
