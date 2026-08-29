@@ -526,9 +526,21 @@ def repair_bronze_years(
         & targets
     )
     if still_deviating:
+        deviations = bronze_column_deviations(repaired, expected)
+        detail = []
+        for year in still_deviating:
+            # A year absent from `repaired` has no readable parquet at all, so
+            # it is in still_deviating via the targets - repaired.keys() term
+            # rather than via deviations.
+            if year not in repaired:
+                detail.append(f"{year}: no bronze file")
+                continue
+            missing, extra = deviations[year]
+            detail.append(f"{year}: missing {list(missing)}, extra {list(extra)}")
         raise RuntimeError(
-            f"Repair left {collection!r} years {still_deviating} still missing "
-            f"expected columns - the extracts on disk do not cover them"
+            f"Repair left {collection!r} years deviating from the expected columns "
+            f"{sorted(expected)} - {'; '.join(detail)}. Either no extract on disk "
+            f"covers them, or a later manifest entry rewrote the year narrower."
         )
     log.info(
         "ipums_bronze_repair_complete",
