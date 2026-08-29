@@ -13,6 +13,7 @@ for a collection whose shape nobody has had to pin down yet.
 """
 
 from pathlib import Path
+from typing import Counter
 
 import structlog
 import yaml
@@ -68,7 +69,9 @@ def load_expected_columns(path: Path) -> frozenset[str] | None:
             f"Parsing config {path} has an 'expected_columns' that is not a "
             f"list of strings"
         )
-    duplicates = sorted({c for c in columns if columns.count(c) > 1})
+
+    duplicates = sorted(c for c, n in Counter(columns).items() if n > 1)
+
     if duplicates:
         raise ValueError(f"Parsing config {path} lists duplicate columns: {duplicates}")
     log.info(
