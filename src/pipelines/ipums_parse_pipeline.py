@@ -431,12 +431,15 @@ def check_bronze_columns(
         dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
             {year: (missing, extra)} for deviating years only, empty when
             every year conforms.
+
+    Raises:
+        ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
     """
     if expected_columns is not None and not expected_columns:
-        # Not equivalent to None: an empty set disarms _refusal_reason's column
-        # gate (`if expected and ...`) while making every year trivially
-        # conform, so a replace=True run would rewrite years unguarded and then
-        # certify the result.
+        # Not equivalent to None: every year trivially conforms against an
+        # empty set, so this would report a healthy collection without having
+        # checked anything.
         raise ValueError(
             "expected_columns is empty - pass None to derive the set from bronze"
         )
@@ -495,6 +498,8 @@ def repair_bronze_years(
             The bronze files rewritten, empty when nothing needed repair.
 
     Raises:
+        ValueError:
+            `expected_columns` is empty. Pass None to derive the set instead.
         RuntimeError:
             A targeted year still lacks expected columns afterwards, or - from
             parse_ipums_extracts - no manifest entry for `collection` is still

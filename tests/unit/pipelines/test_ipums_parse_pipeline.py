@@ -1,4 +1,5 @@
 import gzip
+from collections.abc import Collection
 from pathlib import Path
 
 import pandas as pd
@@ -1286,3 +1287,57 @@ def test_repair_bronze_years_raises_when_a_targeted_year_still_deviates(
             expected_columns={"YEAR", "AGE", "SEX", "EDUC"},
             dictionaries_dir=reference_dir,
         )
+
+
+@pytest.mark.parametrize(
+    "empty",
+    [
+        pytest.param(set(), id="set"),
+        pytest.param([], id="list"),
+        pytest.param((), id="tuple"),
+        pytest.param("", id="str"),
+    ],
+)
+def test_repair_bronze_years_refuses_an_empty_expected_columns(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat, empty: Collection[str]
+) -> None:
+    # Cannot repair anything from empty expected columns
+    external_dir, bronze_dir, reference_dir = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("WTFINL", "Weight", 2)],
+        ("WTFINL",),
+        bronze_vars=[("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+    )
+    before = bronze_path(bronze_dir, "cps", 2006).read_bytes()
+
+    with pytest.raises(ValueError, match="expected_columns is empty"):
+        repair_bronze_years(
+            external_dir,
+            bronze_dir,
+            collection="cps",
+            years=[2006],
+            expected_columns=empty,
+            dictionaries_dir=reference_dir,
+        )
+
+    # Refused before anything was parsed, not after.
+    assert bronze_path(bronze_dir, "cps", 2006).read_bytes() == before
+
+
+def test_check_bronze_columns_refuses_an_empty_expected_columns(
+    tmp_path: Path, make_ddi_xml, make_fixed_width_dat
+) -> None:
+    # Read-only, so it cannot damage anything - but it would report a healthy
+    # collection without having checked a single column.
+    _, bronze_dir, _ = _seed_year_and_pending_entry(
+        tmp_path,
+        make_ddi_xml,
+        make_fixed_width_dat,
+        [("YEAR", "Survey year", 4), ("AGE", "Age", 2)],
+        ("AGE",),
+    )
+
+    with pytest.raises(ValueError, match="expected_columns is empty"):
+        check_bronze_columns(bronze_dir, "cps", expected_columns=set())
