@@ -91,7 +91,12 @@ def test_shipped_cps_config_matches_what_the_pipeline_expects() -> None:
     assert {"YEAR", "AGE", "SEX", "INCWAGE"} <= columns
 
 
-def test_settings_default_points_at_the_shipped_parsing_config() -> None:
+def test_settings_default_points_at_the_shipped_parsing_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from src.config.settings import Settings
 
-    assert Settings().parsing_config_root == PARSING_CONFIG_ROOT
+    monkeypatch.delenv("PARSING_CONFIG_ROOT", raising=False)
+    config_root = Settings().parsing_config_root
+
+    assert config_root == PARSING_CONFIG_ROOT
