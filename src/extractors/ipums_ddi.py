@@ -490,13 +490,11 @@ class FlagRegistry:
         return bool(self.quality or self.topcode)
 
 
-def registry_from_summaries(summaries: Iterable[DDISummary | None]) -> FlagRegistry:
+def registry_from_summaries(summaries: Iterable[DDISummary]) -> FlagRegistry:
     """Takes several DDI summaries and unions flags into one registry."""
     quality: dict[str, list[str]] = {}
     topcode: dict[str, list[str]] = {}
     for summary in summaries:
-        if summary is None:
-            continue
         for mapping, out in (
             (summary.quality_flags, quality),
             (summary.topcode_flags, topcode),
@@ -527,7 +525,7 @@ def collection_flag_registry(
     it in rather than re-reading it.
     """
 
-    summaries: list[DDISummary | None] = []
+    summaries: list[DDISummary] = []
 
     valid_entries = iter_valid_entries(
         source_dir=collection_dir,
@@ -546,7 +544,9 @@ def collection_flag_registry(
         # Try to read from raw XML-codebooks
         ddi_path = metadata.get("ddi_path")
         if ddi_path and Path(ddi_path).exists():
-            summaries.append(try_summarize_ddi(Path(ddi_path)))
+            summary = try_summarize_ddi(Path(ddi_path))
+            if summary is not None:
+                summaries.append(summary)
             continue
 
         # Try to read from raw XML-codebooks accepting old/stale version of
@@ -563,12 +563,11 @@ def collection_flag_registry(
 
     # If nothing usable came out of the manifest (no entries, or every recorded
     # codebook is unreadable), sweep the directory itself.
-    if (
-        not any(summary is not None for summary in summaries)
-        and collection_dir.exists()
-    ):
+    if not summaries:
         summaries = [
-            try_summarize_ddi(path) for path in sorted(collection_dir.glob("*.xml"))
+            s
+            for p in sorted(collection_dir.glob("*.xml"))
+            if (s := try_summarize_ddi(p)) is not None
         ]
 
     return registry_from_summaries(summaries)
