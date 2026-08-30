@@ -7,6 +7,7 @@ the data file and its DDI codebook as-is.
 from collections.abc import Collection, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
@@ -45,7 +46,7 @@ def _default_data_structure() -> dict[str, dict[str, str]]:
 def _validate_requested_variables(
     collection_dir: Path,
     variables: Sequence[str],
-    manifest_entries: Collection[dict] | None = None,
+    manifest_entries: Collection[dict[str, Any]] | None = None,
     allow_flag_variables: bool = False,
 ) -> None:
     """Raise ValueError if any requested variable is a flag column.
@@ -61,7 +62,7 @@ def _validate_requested_variables(
             Path to collection's dir containing _MANIFEST.yaml.
         variables (Sequence[str]):
             IPUMS variable names, e.g. ["AGE", "SEX"].
-        manifest_entries (Collection[dict] | None):
+        manifest_entries (Collection[dict[str, Any]] | None):
             Already-read _MANIFEST.yaml entries, to save a second read. None
             re-reads `collection_dir`.
         allow_flag_variables (bool):
@@ -128,8 +129,8 @@ def find_matching_extract(
     variables: Sequence[str],
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
-    manifest_entries: Collection[dict] | None = None,
-) -> tuple[Path, Path, int, dict] | None:
+    manifest_entries: Collection[dict[str, Any]] | None = None,
+) -> tuple[Path, Path, int, dict[str, Any]] | None:
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
 
@@ -150,12 +151,12 @@ def find_matching_extract(
             A form of data pulled: Hierarchical or rectangular data.
         data_quality_flags (bool):
             Whether to pull IPUMS Data quality flags.
-        manifest_entries (Collection[dict] | None):
+        manifest_entries (Collection[dict[str, Any]] | None):
             Already-read _MANIFEST.yaml entries, to save a second read. None
             re-reads `collection_dir`.
 
     Returns:
-        tuple[Path, Path, int] | None: `(data_path, ddi_path, extract_id)` for
+        tuple[Path, Path, int, dict[str, Any]] | None: `(data_path, ddi_path, extract_id)` for
         the most recent matching entry - the .dat.gz, its DDI codebook, and the
         IPUMS extract number - or None if no entry matches.
     """
@@ -198,7 +199,7 @@ def find_matching_extract(
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
         if data_path.exists() and ddi_path.exists():
-            match = (data_path, ddi_path, metadata["extract_id"], entry)
+            match = (data_path, ddi_path, int(metadata["extract_id"]), entry)
     return match
 
 

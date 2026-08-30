@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 import yaml
@@ -113,7 +113,7 @@ class CollectionCoverage:
         return frozenset(year for year in years if year is not None)
 
 
-def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
+def _delivered_variables(entry: dict[str, Any], ddi_path: Path) -> tuple[str, ...]:
     """Return the columns that an entry's extract really delivered.
 
     Prefers what the entry recorded at download time. Falls back to the
