@@ -98,6 +98,13 @@ _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
 _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
+def _as_name_list(value: object) -> list[str] | None:
+    """A YAML list of names, or None if the value is any other shape."""
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return value
+    return None
+
+
 def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
     """Takes a variable label and determines flag kind and source variable(s)
 
@@ -351,7 +358,7 @@ def summary_from_metadata(
         `summary.ddi_path` from this function as a codebook without checking
         `.suffix == ".xml"`.
     """
-    delivered = metadata.get("delivered_variables")
+    delivered = _as_name_list(metadata["delivered_variables"])
     if not delivered:
         return None
 

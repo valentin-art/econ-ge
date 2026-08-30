@@ -33,7 +33,7 @@ from typing import Literal
 import structlog
 import yaml
 
-from src.extractors.ipums_ddi import try_summarize_ddi
+from src.extractors.ipums_ddi import _as_name_list, try_summarize_ddi
 from src.extractors.manifest import read_manifest
 
 log = structlog.get_logger(__name__)
@@ -115,7 +115,7 @@ def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
     column.
     """
     metadata = entry["metadata"]
-    recorded = metadata.get("delivered_variables")
+    recorded = _as_name_list(metadata["delivered_variables"])
     if recorded is not None:
         return tuple(recorded)
 
@@ -166,6 +166,18 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
         if not data_path.exists() or not ddi_path.exists():
             continue
         delivered = _delivered_variables(entry, ddi_path)
+
+        sample_field = _as_name_list(metadata["samples"])
+        variables_field = _as_name_list(metadata["variables"])
+
+        if sample_field is None or variables_field is None:
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="samples_or_variables_not_a_list_of_names",
+                entry=str(entry)[:200],
+            )
+            continue
+
         for sample in metadata["samples"]:
             requested_by_sample.setdefault(sample, set()).update(metadata["variables"])
             delivered_by_sample.setdefault(sample, set()).update(delivered)
