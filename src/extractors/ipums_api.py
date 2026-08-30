@@ -42,17 +42,41 @@ _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"
 class CachedExtract(NamedTuple):
     """Contains information about cached data extract.
 
-    size_bytes and sha256 come from manifest, not recomputed."""
+    size_bytes and sha256 come from manifest, not recomputed. Both are None if
+    the entry recorded neither usably - the file is still reused, and the
+    checksum is recomputed from disk."""
 
     data_path: Path
     ddi_path: Path
     extract_id: int
-    size_bytes: int
-    sha256: str
+    size_bytes: int | None
+    sha256: str | None
 
 
 def _default_data_structure() -> dict[str, dict[str, str]]:
     return {"rectangular": {"on": "P"}}
+
+
+def _recorded_checksum(entry: dict[str, Any]) -> tuple[int, str] | tuple[None, None]:
+    """Size and checksum an entry recorded, or (None, None) if neither is usable.
+
+    (None, None) is not a reason to discard a match: re-reading one local file
+    is cheaper than the extract quota a re-download would spend.
+    """
+    sha256 = entry.get("sha256")
+    # str() would turn a null/absent checksum into the literal "None", so the
+    # shape is checked rather than coerced. int() does raise, so it is not.
+    if isinstance(sha256, str) and sha256:
+        try:
+            return int(entry["size_bytes"]), sha256
+        except (KeyError, TypeError, ValueError):
+            pass
+    log.info(
+        "ipums_manifest_checksum_recomputed",
+        reason="unusable_size_or_checksum",
+        entry=str(entry)[:200],
+    )
+    return (None, None)
 
 
 def _validate_requested_variables(
@@ -213,15 +237,14 @@ def find_matching_extract(
         if data_path.exists() and ddi_path.exists():
             try:
                 extract_id = int(metadata["extract_id"])
-                size_bytes = int(entry["size_bytes"])
-                sha256 = str(entry["sha256"])
             except (KeyError, TypeError, ValueError):
                 log.warning(
                     "ipums_manifest_entry_skipped",
-                    reason="unusable_id_size_or_checksum",
+                    reason="unusable_extract_id",
                     entry=str(entry)[:200],
                 )
                 continue
+            size_bytes, sha256 = _recorded_checksum(entry)
             match = CachedExtract(
                 data_path,
                 ddi_path,
@@ -441,24 +464,29 @@ class IPUMSExtractor(Extractor):
             )
         extraction_id = f"{collection}_{extract_id:05d}"
 
-        if cached is not None:
+        recorded_size = cached.size_bytes if cached is not None else None
+        recorded_sha = cached.sha256 if cached is not None else None
+        if recorded_size is not None and recorded_sha is not None:
             record = ExtractionRecord(
                 source="ipums_api",
                 extraction_id=extraction_id,
                 extracted_at=datetime.now(timezone.utc),
                 file_path=data_path,
-                size_bytes=cached.size_bytes,
-                sha256=cached.sha256,
+                size_bytes=recorded_size,
+                sha256=recorded_sha,
                 metadata=metadata,
             )
         else:
+            # A cache hit whose entry recorded no usable checksum lands here
+            # too - it re-hashes the file it already has, but does not append.
             record = build_extraction_record(
                 source="ipums_api",
                 extraction_id=extraction_id,
                 file_path=data_path,
                 metadata=metadata,
             )
-            append_to_manifest(collection_dir, record)
+            if cached is None:
+                append_to_manifest(collection_dir, record)
 
         log.info(
             "ipums_extract_complete",

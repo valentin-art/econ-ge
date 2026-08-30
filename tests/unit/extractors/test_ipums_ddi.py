@@ -309,6 +309,50 @@ def test_summary_from_metadata_round_trips_recorded_keys() -> None:
     assert summary.quality_flags == {"INCWAGE": ("QINCWAGE",)}
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        pytest.param("QINCWAGE", id="scalar_string"),
+        pytest.param(None, id="null"),
+        pytest.param({"nested": "map"}, id="mapping"),
+        pytest.param(["QINCWAGE", 7], id="list_with_non_string"),
+    ],
+)
+def test_summary_from_metadata_rejects_a_flag_map_value_that_is_not_a_name_list(
+    bad_value: object,
+) -> None:
+    # tuple() on a scalar coerces rather than rejects: "QINCWAGE" would become
+    # ('Q','I','N','C',...), which silently drops the real flag column out of
+    # the registry and out of merge_column_names.
+    summary = summary_from_metadata(
+        {
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "flag_parser_version": FLAG_PARSER_VERSION,
+            "ddi_path": "/tmp/x.xml",
+            "quality_flags": {"INCWAGE": bad_value},
+        }
+    )
+
+    assert summary is not None
+    assert dict(summary.quality_flags) == {}
+    assert summary.flag_names == frozenset()
+    assert summary.kind_of("Q") is None
+
+
+def test_summary_from_metadata_keeps_the_well_formed_pairs_of_a_partial_map() -> None:
+    summary = summary_from_metadata(
+        {
+            "delivered_variables": ["INCWAGE", "QINCWAGE", "INCFARM"],
+            "flag_parser_version": FLAG_PARSER_VERSION,
+            "ddi_path": "/tmp/x.xml",
+            "quality_flags": {"INCWAGE": ["QINCWAGE"], "INCFARM": "QINCFARM"},
+        }
+    )
+
+    assert summary is not None
+    assert dict(summary.quality_flags) == {"INCWAGE": ("QINCWAGE",)}
+
+
 def test_summary_from_metadata_is_none_for_legacy_entry() -> None:
     assert summary_from_metadata({"variables": ["AGE"]}) is None
 

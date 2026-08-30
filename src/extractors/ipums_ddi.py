@@ -327,6 +327,29 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
     return summary
 
 
+def _as_flag_map(value: object, kind: str) -> dict[str, tuple[str, ...]]:
+    """source-variable -> flag-names map recorded in a manifest entry.
+
+    Drops any pair whose value is not a list of names: tuple() on a scalar
+    would coerce "QINCWAGE" into ('Q', 'I', ...) rather than rejecting it.
+    """
+    if not isinstance(value, dict):
+        return {}
+    flag_map = {
+        source: tuple(names)
+        for source, raw in value.items()
+        if isinstance(source, str) and (names := as_name_list(raw)) is not None
+    }
+    if len(flag_map) != len(value):
+        log.warning(
+            "ipums_flag_map_entries_dropped",
+            kind=kind,
+            reason="value_not_a_list_of_names",
+            kept=sorted(flag_map),
+        )
+    return flag_map
+
+
 def summary_from_metadata(
     metadata: Mapping[str, Any], require_current_parser: bool = True
 ) -> DDISummary | None:
@@ -369,18 +392,17 @@ def summary_from_metadata(
     ):
         return None
 
-    quality = metadata.get("quality_flags")
-    topcode = metadata.get("topcode_flags")
-    quality_flags = quality if isinstance(quality, dict) else {}
-    topcode_flags = topcode if isinstance(topcode, dict) else {}
-
     return DDISummary(
         ddi_path=Path(str(metadata["ddi_path"]))
         if metadata.get("ddi_path")
         else Path(),
         variables=tuple(delivered),
-        quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
-        topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
+        quality_flags=MappingProxyType(
+            _as_flag_map(metadata.get("quality_flags"), "quality")
+        ),
+        topcode_flags=MappingProxyType(
+            _as_flag_map(metadata.get("topcode_flags"), "topcode")
+        ),
     )
 
 

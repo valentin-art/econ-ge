@@ -8,9 +8,11 @@ commented out - uncomment it and run manually (with a real IPUMS_API_KEY
 configured) to confirm live connectivity beyond what the tests below cover.
 """
 
+import hashlib
 from pathlib import Path
 
 import pytest
+import yaml
 import structlog.testing
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
@@ -155,6 +157,74 @@ def test_extract_reuses_matching_manifest_entry_without_hitting_api(
     manifest_entries = read_manifest(tmp_path / "cps")
     assert len(manifest_entries) == 1
     assert manifest_entries[0]["metadata"]["extract_id"] == 1
+
+
+def _corrupt_manifest_checksum(collection_dir: Path, **fields: object) -> None:
+    """Rewrite the sole manifest entry's size/checksum fields in place."""
+    manifest_path = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest_path.read_text())
+    entries[0].update(fields)
+    manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        pytest.param({"size_bytes": "not-a-number"}, id="unparseable_size"),
+        pytest.param({"sha256": None}, id="null_checksum"),
+        pytest.param({"size_bytes": None, "sha256": None}, id="both_null"),
+    ],
+)
+def test_extract_recomputes_checksum_rather_than_resubmitting(
+    tmp_path: Path, corruption: dict
+) -> None:
+    # An entry that matches on everything but carries no usable checksum is
+    # still a cache hit: re-hashing the local file beats spending an IPUMS
+    # extract on a re-download of a file already on disk.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    _corrupt_manifest_checksum(tmp_path / "cps", **corruption)
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is True
+    # Recomputed from the file on disk, not carried over from the entry.
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    assert record.size_bytes == data_path.stat().st_size
+    assert record.sha256 == hashlib.sha256(data_path.read_bytes()).hexdigest()
+    # Still a cache hit, so still no new manifest entry.
+    assert len(read_manifest(tmp_path / "cps")) == 1
+
+
+def test_extract_resubmits_when_the_extract_id_itself_is_unusable(
+    tmp_path: Path,
+) -> None:
+    # extract_id is not recoverable from the file - it names the download and
+    # the extraction_id - so an unusable one is still a hard skip.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    manifest_path = tmp_path / "cps" / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest_path.read_text())
+    entries[0]["metadata"]["extract_id"] = "not-a-number"
+    manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is False
+    assert len(read_manifest(tmp_path / "cps")) == 2
 
 
 def test_extract_falls_through_when_variables_not_a_subset(tmp_path: Path) -> None:
