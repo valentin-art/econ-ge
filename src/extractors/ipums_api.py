@@ -345,11 +345,11 @@ class IPUMSExtractor(Extractor):
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
-        # ipumspy upper-cases Variable.name on construction, and
-        # add_data_quality_flags resolves by exact string match - so normalize
-        # before anything looks a name up, or a lower-case request silently
-        # yields a flagless extract.
+
+        # Normalization of variables for convenence and to avoid typos in config files.
         variables = tuple(v.upper() for v in variables)
+        # samples = tuple(v.upper() for v in samples)
+
         # One read, two consumers: the flag registry and the cache lookup.
         # build_coverage (extract_incremental only) still reads for itself.
         manifest_entries = read_manifest(collection_dir)
@@ -382,8 +382,8 @@ class IPUMSExtractor(Extractor):
             log.info(
                 "ipums_extract_cached",
                 collection=collection,
-                extract_id=cached.extract_id,
-                file_path=str(cached.data_path),
+                extract_id=extract_id,
+                file_path=data_path,
             )
         else:
             microdata_extract = MicrodataExtract(
@@ -559,6 +559,8 @@ class IPUMSExtractor(Extractor):
                 and no new extracts were needed.
         """
         variables = tuple(v.upper() for v in variables)
+        # samples = tuple(v.upper() for v in samples)
+
         collection_dir = self.storage_dir / collection
         if force:
             coverage = build_coverage(collection_dir, collection)

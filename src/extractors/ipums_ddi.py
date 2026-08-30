@@ -58,22 +58,10 @@ log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
 
-# Bump whenever parse_flag_label or its regexes change. extract() stamps this
-# into every manifest entry it writes; a recorded flag map carrying a different
-# stamp is ignored and re-derived from the codebook, so a parser fix reaches
-# entries written before it.
-#
-# The stamp gates only the flag maps read back by summary_from_metadata.
-# ipums_coverage._delivered_variables trusts a recorded `delivered_variables`
-# list regardless of version, so changing how _summarize_codebook enumerates
-# columns needs its own decision - this constant does not cover it.
-#
-# NOTE: entries written before this constant existed carry no stamp and there is
-# no update-in-place in extractors.manifest, so they re-parse their codebook on
-# every call - by design, and cheap next to one API round trip.
+# A version of regex expressions. Increment after each change.
 FLAG_PARSER_VERSION = 1
 
-# Regex expressions aimed to recognize flags in local codebooks
+# Regex expressions aimed to recognize flags
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "quality": re.compile(
         r"^\s*data\s+quality\s+flags?\s+for\s+(?P<sources>.+)$", re.I
@@ -93,8 +81,8 @@ _TRAILING_PUNCT_RE = re.compile(r"[.,;:]+\s*$")
 _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
 
 
-# Regex expression that aims to determine if sepected candidate is
-# a valid variable from a local codebook
+# Regex expression that aims to determine if selected candidate is
+# a valid variable from a manifest
 _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
