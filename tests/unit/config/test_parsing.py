@@ -32,11 +32,18 @@ def test_missing_config_is_not_an_error(tmp_path: Path) -> None:
     assert load_expected_columns(tmp_path / "absent.yaml") is None
 
 
-def test_config_with_empty_expected_columns_raises_error(tmp_path: Path) -> None:
-    path1 = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
+def test_rejects_an_empty_expected_columns_list(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
 
     with pytest.raises(ValueError, match="declares an empty"):
-        load_expected_columns(path1)
+        load_expected_columns(path)
+
+
+def test_rejects_a_falsy_non_list_expected_columns(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
+
+    with pytest.raises(ValueError, match="declares an empty"):
+        load_expected_columns(path)
 
     path2 = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
     with pytest.raises(ValueError, match="not a list of strings"):
@@ -104,3 +111,12 @@ def test_settings_default_points_at_the_shipped_parsing_config(
     config_root = Settings().parsing_config_root
 
     assert config_root == PARSING_CONFIG_ROOT
+
+
+def test_rejects_a_config_that_is_not_a_mapping(tmp_path: Path) -> None:
+    path = parsing_config_path(tmp_path, "ipums", "cps")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("- YEAR\n- AGE\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_expected_columns(path)
