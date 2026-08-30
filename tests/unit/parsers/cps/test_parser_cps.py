@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.parsers.cps import (
+from src.parsers.cps.parser_cps import (
     CPSVariable,
     apply_value_labels,
     bronze_path,

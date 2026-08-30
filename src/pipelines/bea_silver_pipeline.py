@@ -34,9 +34,9 @@ from src.features.bea.rental_prices import (
     rental_shares,
 )
 from src.input_output.parquet import read_parquet
-from src.parsers.asset_dim import build_asset_dim
-from src.parsers.bea_bronze import bronze_path
-from src.parsers.wide import to_wide
+from src.parsers.bea.asset_dim import build_asset_dim
+from src.parsers.bea.parser_bea import bronze_path
+from src.parsers.bea.wide import to_wide
 from src.schemas.silver.bea_silver import validate_bea_silver
 
 log = structlog.get_logger(__name__)

@@ -9,7 +9,7 @@ import yaml
 
 from src.extractors.base import build_extraction_record
 from src.extractors.manifest import MANIFEST_FILENAME, append_to_manifest, read_manifest
-from src.parsers.ipums import (
+from src.parsers.ipums.parser_ipums import (
     bronze_path,
     load_variable_dictionary,
     parse_to_bronze,

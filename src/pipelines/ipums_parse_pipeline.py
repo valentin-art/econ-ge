@@ -17,7 +17,7 @@ from src.extractors.ipums_ddi import (
     try_summarize_ddi,
 )
 from src.extractors.manifest import read_manifest
-from src.parsers.ipums import (
+from src.parsers.ipums.parser_ipums import (
     bronze_columns_by_year,
     build_and_save_variable_dictionary,
     merge_variables_into_bronze,

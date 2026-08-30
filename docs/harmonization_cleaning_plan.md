@@ -91,10 +91,11 @@ User decisions already made (via clarifying questions):
 mirroring the plain-function style of `src/features/bea/deflators.py` (no
 classes, docstrings explaining the *why*, functions over
 `pd.DataFrame`/`pd.Series`). Inputs are the bronze IPUMS long DataFrame
-(uppercase IPUMS column names, as produced by `parsers.ipums.parse_to_bronze`).
+(uppercase IPUMS column names, as produced by
+`parsers.ipums.parser_ipums.parse_to_bronze`).
 Wherever a function needs to know what a code means (is 999 "missing"? is 0
 "NIU"?), it resolves that through the saved JSON dictionary via
-`src.parsers.dictionary_lookup.get_variable_info` (pointed at
+`src.parsers.cps.dictionary_lookup.get_variable_info` (pointed at
 `settings.paths.reference / "ipums"`) rather than a hardcoded magic number —
 except for constants that are pure AKK/methodology convention (age band
 16-64, topcode 1.5x multiplier, week-interval midpoints), which are not
@@ -178,7 +179,7 @@ don't depend on what's currently on disk. Run with
   confirms which variables/value-labels are actually available (45 vars,
   covers essentially all of Blocks 1-2) and that `INCWAGE` has no value
   labels (gap #1).
-- `src/parsers/dictionary_lookup.py:get_variable_info` — the
+- `src/parsers/cps/dictionary_lookup.py:get_variable_info` — the
   source-agnostic dictionary-lookup helper reused here (pointed at
   `data/reference/ipums/` instead of its default `data/reference/cps/`).
 - `src/features/bea/deflators.py` — style precedent for this kind of

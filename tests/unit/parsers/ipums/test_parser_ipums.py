@@ -9,7 +9,7 @@ import pytest
 import structlog.testing
 from ipumspy import readers
 
-from src.parsers.ipums import (
+from src.parsers.ipums.parser_ipums import (
     _close_writers,
     _YearWriter,
     bronze_columns_by_year,
@@ -457,7 +457,7 @@ def test_parse_to_bronze_does_not_clobber_existing_year_on_mid_stream_failure(
     before = good_path.read_bytes()
 
     calls = {"n": 0}
-    import src.parsers.ipums as ipums_mod
+    import src.parsers.ipums.parser_ipums as ipums_mod
 
     orig = ipums_mod.check_no_duplicate_columns
 

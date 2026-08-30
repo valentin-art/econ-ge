@@ -1,4 +1,4 @@
-from src.parsers.asset_dim import build_asset_dim
+from src.parsers.bea.asset_dim import build_asset_dim
 
 
 def test_nonres_excludes_residential_lines() -> None:

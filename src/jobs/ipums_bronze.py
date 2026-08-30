@@ -13,7 +13,7 @@ import click
 
 from src.config.parsing import load_collection_expected_columns
 from src.config.settings import settings
-from src.parsers.ipums import bronze_columns_by_year
+from src.parsers.ipums.parser_ipums import bronze_columns_by_year
 from src.pipelines.ipums_parse_pipeline import (
     check_bronze_columns,
     repair_bronze_years,

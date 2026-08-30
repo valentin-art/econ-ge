@@ -14,7 +14,7 @@ from pathlib import Path
 import structlog
 
 from src.config import sources
-from src.parsers.bea_bronze import parse_to_bronze
+from src.parsers.bea.parser_bea import parse_to_bronze
 
 log = structlog.get_logger(__name__)
 
