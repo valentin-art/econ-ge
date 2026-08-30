@@ -227,6 +227,27 @@ class PlannedExtract:
     request_kind: RequestKind
 
 
+def plan_force_requests(
+    coverage: CollectionCoverage,
+    samples: Sequence[str],
+    variables: Sequence[str],
+) -> list[PlannedExtract]:
+    """Force variant of plan_delta_requests: pull every requested variable for
+    every sample, but keep the known/new split so the parse stage merges onto
+    existing bronze columns instead of overwriting them.
+    """
+    all_variables = tuple(variables)
+    new = tuple(s for s in samples if s not in coverage.samples)
+    known = tuple(s for s in samples if s in coverage.samples)
+
+    planned: list[PlannedExtract] = []
+    if new:
+        planned.append(PlannedExtract(new, all_variables, "new_samples"))
+    if known:
+        planned.append(PlannedExtract(known, all_variables, "variable_delta"))
+    return planned
+
+
 def plan_delta_requests(
     coverage: CollectionCoverage,
     samples: Sequence[str],

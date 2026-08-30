@@ -23,6 +23,7 @@ from src.extractors.ipums_coverage import (
     RequestKind,
     build_coverage,
     plan_delta_requests,
+    plan_force_requests,
     save_coverage,
 )
 from src.extractors.ipums_ddi import (
@@ -278,6 +279,73 @@ class IPUMSExtractor(Extractor):
             client if client is not None else IpumsApiClient(api_key=self.api_key)
         )
 
+    def _submit_and_download(
+        self,
+        collection_dir: Path,
+        collection: str,
+        samples: Sequence[str],
+        variables: Sequence[str],
+        data_structure: dict[str, dict[str, str]],
+        description: str,
+        data_quality_flags: bool,
+    ) -> tuple[Path, Path, int]:
+        """Submit a new extract, wait for it, and download it to collection_dir.
+
+        Returns:
+            (data_path, ddi_path, extract_id) for the downloaded files.
+
+        Raises:
+            BadIpumsApiRequest: re-raised with the requested samples/variables and,
+                if the message mentions a variable/mnemonic, a hint about flag
+                columns.
+            FileNotFoundError: the download completed but the expected
+                {collection}_{extract_id:05d}.dat.gz/.xml pair is not on disk.
+        """
+
+        microdata_extract = MicrodataExtract(
+            collection=collection,
+            samples=list(samples),
+            variables=list(variables),
+            description=description,
+            data_structure=data_structure,
+        )
+        if data_quality_flags:
+            # Per-variable rather than the extract-level `data_quality_flags=`
+            # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
+            # typo there would silently produce a flagless extract. Assumes IPUMS
+            # ignores the request for variables that have no flag.
+            microdata_extract.add_data_quality_flags(list(variables))
+        try:
+            self.client.submit_extract(microdata_extract)
+        except BadIpumsApiRequest as exc:
+            hint = ""
+            if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
+                hint = (
+                    "\nIf any of these are IPUMS flag columns, they cannot "
+                    "be requested by name: drop them from `variables` and "
+                    "pass data_quality_flags=True - the flag column is added "
+                    "automatically for every requested variable that has one."
+                )
+            raise BadIpumsApiRequest(
+                f"{exc}\n\nRequested samples: {sorted(samples)}\n"
+                f"Requested variables: {sorted(variables)}{hint}"
+            ) from exc
+
+        self.client.wait_for_extract(microdata_extract)
+        self.client.download_extract(microdata_extract, download_dir=collection_dir)
+        extract_id = microdata_extract.extract_id
+        data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
+        ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
+
+        if not data_path.exists() or not ddi_path.exists():
+            found = sorted(p.name for p in collection_dir.glob(f"*{extract_id:05d}*"))
+            raise FileNotFoundError(
+                f"Expected {data_path.name} and {ddi_path.name} after download, "
+                f"found instead: {found}"
+            )
+
+        return data_path, ddi_path, extract_id
+
     def extract(
         self,
         collection: str,
@@ -462,73 +530,6 @@ class IPUMSExtractor(Extractor):
         )
         return record
 
-    def _submit_and_download(
-        self,
-        collection_dir: Path,
-        collection: str,
-        samples: Sequence[str],
-        variables: Sequence[str],
-        data_structure: dict[str, dict[str, str]],
-        description: str,
-        data_quality_flags: bool,
-    ) -> tuple[Path, Path, int]:
-        """Submit a new extract, wait for it, and download it to collection_dir.
-
-        Returns:
-            (data_path, ddi_path, extract_id) for the downloaded files.
-
-        Raises:
-            BadIpumsApiRequest: re-raised with the requested samples/variables and,
-                if the message mentions a variable/mnemonic, a hint about flag
-                columns.
-            FileNotFoundError: the download completed but the expected
-                {collection}_{extract_id:05d}.dat.gz/.xml pair is not on disk.
-        """
-
-        microdata_extract = MicrodataExtract(
-            collection=collection,
-            samples=list(samples),
-            variables=list(variables),
-            description=description,
-            data_structure=data_structure,
-        )
-        if data_quality_flags:
-            # Per-variable rather than the extract-level `data_quality_flags=`
-            # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
-            # typo there would silently produce a flagless extract. Assumes IPUMS
-            # ignores the request for variables that have no flag.
-            microdata_extract.add_data_quality_flags(list(variables))
-        try:
-            self.client.submit_extract(microdata_extract)
-        except BadIpumsApiRequest as exc:
-            hint = ""
-            if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
-                hint = (
-                    "\nIf any of these are IPUMS flag columns, they cannot "
-                    "be requested by name: drop them from `variables` and "
-                    "pass data_quality_flags=True - the flag column is added "
-                    "automatically for every requested variable that has one."
-                )
-            raise BadIpumsApiRequest(
-                f"{exc}\n\nRequested samples: {sorted(samples)}\n"
-                f"Requested variables: {sorted(variables)}{hint}"
-            ) from exc
-
-        self.client.wait_for_extract(microdata_extract)
-        self.client.download_extract(microdata_extract, download_dir=collection_dir)
-        extract_id = microdata_extract.extract_id
-        data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
-        ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
-
-        if not data_path.exists() or not ddi_path.exists():
-            found = sorted(p.name for p in collection_dir.glob(f"*{extract_id:05d}*"))
-            raise FileNotFoundError(
-                f"Expected {data_path.name} and {ddi_path.name} after download, "
-                f"found instead: {found}"
-            )
-
-        return data_path, ddi_path, extract_id
-
     def extract_incremental(
         self,
         collection: str,
@@ -593,39 +594,13 @@ class IPUMSExtractor(Extractor):
         # samples = tuple(v.lower() for v in samples)
 
         collection_dir = self.storage_dir / collection
-        if force:
-            coverage = build_coverage(collection_dir, collection)
-            # Force means "pull it regardless of whether plan_delta_requests
-            # would think it's needed"
-            known_samples = [s for s in samples if s in coverage.samples]
-            new_samples = [s for s in samples if s not in coverage.samples]
-            groups: list[tuple[list[str], RequestKind]] = []
-            if new_samples:
-                groups.append((new_samples, "new_samples"))
-            if known_samples:
-                groups.append((known_samples, "variable_delta"))
-            records = [
-                self.extract(
-                    collection=collection,
-                    samples=group_samples,
-                    variables=variables,
-                    data_quality_flags=data_quality_flags,
-                    data_structure=data_structure,
-                    description=description,
-                    request_kind=request_kind,
-                    force=True,
-                    allow_flag_variables=allow_flag_variables,
-                )
-                for group_samples, request_kind in groups
-            ]
-            if records:
-                save_coverage(
-                    build_coverage(collection_dir, collection), collection_dir
-                )
-            return records
-
         coverage = build_coverage(collection_dir, collection)
-        planned = plan_delta_requests(coverage, samples, variables)
+        planned = (
+            plan_force_requests(coverage, samples, variables)
+            if force
+            else plan_delta_requests(coverage, samples, variables)
+        )
+
         if not planned:
             log.info(
                 "ipums_extract_already_covered",
@@ -645,6 +620,7 @@ class IPUMSExtractor(Extractor):
                 data_quality_flags=data_quality_flags,
                 data_structure=data_structure,
                 allow_flag_variables=allow_flag_variables,
+                force=force,
             )
             for plan in planned
         ]
