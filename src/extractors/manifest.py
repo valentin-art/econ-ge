@@ -1,4 +1,4 @@
-"""Append-only manifest of ExtractionRecords for one external-source directory."""
+"""Read and append manifests of ExtractRecord."""
 
 from pathlib import Path
 from typing import Any
