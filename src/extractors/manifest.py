@@ -9,6 +9,13 @@ from src.extractors.base import ExtractionRecord
 MANIFEST_FILENAME = "_MANIFEST.yaml"
 
 
+def as_name_list(value: object) -> list[str] | None:
+    """A list of names, or None if the value is any other shape."""
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        return list(value)
+    return None
+
+
 def read_manifest(source_dir: Path) -> list[dict]:
     """Read source_dir/_MANIFEST.yaml; returns [] if it doesn't exist yet."""
     manifest_path = source_dir / MANIFEST_FILENAME

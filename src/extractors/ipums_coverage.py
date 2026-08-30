@@ -1,27 +1,9 @@
-"""Coverage tracking for IPUMS extracts: derives, from _MANIFEST.yaml (cross-
-checked against the .dat.gz/.xml files it references), which samples and
-variables a collection already has on disk, and plans the minimal set of new
-extracts needed to satisfy a bigger request.
+"""What a collection already has on disk, and what a new request still needs.
 
-Pure and network-free - operates only on manifest entries, their DDI codebooks
-and Path.exists() checks, so it's testable without hitting the IPUMS API. Used
-by extractors.ipums_api.IPUMSExtractor.extract_incremental to avoid
-re-submitting extracts that would just duplicate samples/variables already
-pulled (every submit_extract call counts against the user's IPUMS account
-quota).
-
-Coverage distinguishes what was *requested* from what was *delivered*: IPUMS
-returns a flag column for each requested variable that has one, plus technical
-and weight columns nobody asked for. Diffing runs on the requested set, because
-that is what a caller can ask for again; the delivered set is what
-_COVERAGE.yaml reports, because that is what is really in the files.
-
-Coverage is deliberately not aware of data_quality_flags or data_structure.
-Both are request modifiers rather than coverage dimensions: reusing a
-flags-off extract for a flags-on request is already blocked by
-extractors.ipums_api.find_matching_extract, and hierarchical-vs-rectangular
-changes the row grain, which belongs in a separate collection rather than a
-boolean on a sample.
+Folds _MANIFEST.yaml into per-sample coverage - what was requested, and what the
+files actually delivered - and diffs a request against it to plan the minimal
+set of new extracts. Used by IPUMSExtractor.extract_incremental, because every
+IPUMS submission counts against the account's extract quota.
 """
 
 import re
@@ -34,8 +16,8 @@ from typing import Any, Literal
 import structlog
 import yaml
 
-from src.extractors.ipums_ddi import _as_name_list, try_summarize_ddi
-from src.extractors.manifest import read_manifest
+from src.extractors.ipums_ddi import try_summarize_ddi
+from src.extractors.manifest import as_name_list, read_manifest
 
 log = structlog.get_logger(__name__)
 
@@ -120,7 +102,7 @@ def _delivered_variables(entry: dict[str, Any], ddi_path: Path) -> tuple[str, ..
     column.
     """
     metadata = entry["metadata"]
-    recorded = _as_name_list(metadata.get("delivered_variables"))
+    recorded = as_name_list(metadata.get("delivered_variables"))
     if recorded is not None:
         return tuple(recorded)
 
@@ -171,8 +153,8 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
         if not data_path.exists() or not ddi_path.exists():
             continue
 
-        sample_field = _as_name_list(metadata["samples"])
-        variables_field = _as_name_list(metadata["variables"])
+        sample_field = as_name_list(metadata["samples"])
+        variables_field = as_name_list(metadata["variables"])
 
         if sample_field is None or variables_field is None:
             log.warning(

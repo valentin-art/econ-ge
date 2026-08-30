@@ -52,7 +52,7 @@ from typing import Any, Literal
 import structlog
 from ipumspy import Codebook, readers
 
-from src.extractors.manifest import read_manifest
+from src.extractors.manifest import as_name_list, read_manifest
 
 log = structlog.get_logger(__name__)
 
@@ -96,19 +96,6 @@ _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
 # Regex expression that aims to determine if sepected candidate is
 # a valid variable from a local codebook
 _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-
-
-def _as_name_list(value: object) -> list[str] | None:
-    """A list of names, or None if the value is any other shape.
-
-    Tuples count: YAML hands these fields back as lists, but metadata built
-    in-memory by extract() carries tuples, and summary_from_metadata is called
-    on both. A str is not a sequence of names here - that is the shape this
-    guard exists to reject.
-    """
-    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
-        return list(value)
-    return None
 
 
 def parse_flag_label(label: str) -> tuple[FlagKind, tuple[str, ...]] | None:
@@ -369,7 +356,7 @@ def summary_from_metadata(
         `summary.ddi_path` from this function as a codebook without checking
         `.suffix == ".xml"`.
     """
-    delivered = _as_name_list(metadata.get("delivered_variables"))
+    delivered = as_name_list(metadata.get("delivered_variables"))
     if not delivered:
         return None
 
