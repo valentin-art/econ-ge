@@ -25,9 +25,10 @@ boolean on a sample.
 """
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 import structlog
@@ -81,7 +82,13 @@ class SampleCoverage:
 @dataclass(frozen=True)
 class CollectionCoverage:
     collection: str
-    samples: dict[str, SampleCoverage]
+    samples: Mapping[str, SampleCoverage] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    # Same reasoning as DDISummary/FlagRegistry: `samples` is unhashable, so
+    # the frozen=True default __hash__ would only ever fail by accident.
+    __hash__ = None  # type: ignore[assignment]
 
     @property
     def requested_variables(self) -> frozenset[str]:
