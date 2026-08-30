@@ -5,6 +5,7 @@ the data file and its DDI codebook as-is.
 """
 
 from collections.abc import Collection, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -128,7 +129,7 @@ def find_matching_extract(
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
     manifest_entries: Collection[dict] | None = None,
-) -> tuple[Path, Path, int] | None:
+) -> tuple[Path, Path, int, dict] | None:
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
 
@@ -197,7 +198,7 @@ def find_matching_extract(
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
         if data_path.exists() and ddi_path.exists():
-            match = (data_path, ddi_path, metadata["extract_id"])
+            match = (data_path, ddi_path, metadata["extract_id"], entry)
     return match
 
 
@@ -319,7 +320,7 @@ class IPUMSExtractor(Extractor):
             )
         )
         if cached is not None:
-            data_path, ddi_path, extract_id = cached
+            data_path, ddi_path, extract_id, matched_entry = cached
             log.info(
                 "ipums_extract_cached",
                 collection=collection,
@@ -404,12 +405,25 @@ class IPUMSExtractor(Extractor):
                 ddi_path=str(ddi_path),
             )
         extraction_id = f"{collection}_{extract_id:05d}"
-        record = build_extraction_record(
-            source="ipums_api",
-            extraction_id=extraction_id,
-            file_path=data_path,
-            metadata=metadata,
-        )
+
+        if cached is not None:
+            record = ExtractionRecord(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                extracted_at=datetime.now(timezone.utc),
+                file_path=data_path,
+                size_bytes=matched_entry["size_bytes"],
+                sha256=matched_entry["sha256"],
+                metadata=metadata,
+            )
+        else:
+            record = build_extraction_record(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                file_path=data_path,
+                metadata=metadata,
+            )
+
         append_to_manifest(collection_dir, record)
         log.info(
             "ipums_extract_complete",
