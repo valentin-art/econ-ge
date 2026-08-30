@@ -40,14 +40,9 @@ def test_rejects_an_empty_expected_columns_list(tmp_path: Path) -> None:
 
 
 def test_rejects_a_falsy_non_list_expected_columns(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
-
-    with pytest.raises(ValueError, match="declares an empty"):
-        load_expected_columns(path)
-
-    path2 = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
+    path = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
     with pytest.raises(ValueError, match="not a list of strings"):
-        load_expected_columns(path2)
+        load_expected_columns(path)
 
 
 def test_config_without_expected_columns_returns_none(tmp_path: Path) -> None:
