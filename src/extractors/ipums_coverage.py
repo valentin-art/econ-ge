@@ -166,7 +166,7 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
 
         delivered = _delivered_variables(entry, ddi_path)
 
-        for sample in metadata["samples"]:
+        for sample in sample_field:
             requested_by_sample.setdefault(sample, set()).update(variables_field)
             delivered_by_sample.setdefault(sample, set()).update(delivered)
             ids = extraction_ids_by_sample.setdefault(sample, [])

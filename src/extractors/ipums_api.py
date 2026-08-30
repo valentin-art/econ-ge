@@ -40,6 +40,10 @@ _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"
 
 
 class CachedExtract(NamedTuple):
+    """Contains information about cached data extract.
+
+    size_bytes and sha256 come from manifest, not recomputed."""
+
     data_path: Path
     ddi_path: Path
     extract_id: int
@@ -208,13 +212,9 @@ def find_matching_extract(
 
         if data_path.exists() and ddi_path.exists():
             try:
-                candidate = CachedExtract(
-                    data_path,
-                    ddi_path,
-                    int(metadata["extract_id"]),
-                    int(entry["size_bytes"]),
-                    str(entry["sha256"]),
-                )
+                extract_id = int(metadata["extract_id"])
+                size_bytes = int(entry["size_bytes"])
+                sha256 = str(entry["sha256"])
             except (KeyError, TypeError, ValueError):
                 log.warning(
                     "ipums_manifest_entry_skipped",
@@ -222,7 +222,13 @@ def find_matching_extract(
                     entry=str(entry)[:200],
                 )
                 continue
-            match = candidate
+            match = CachedExtract(
+                data_path,
+                ddi_path,
+                extract_id,
+                size_bytes,
+                sha256,
+            )
 
     return match
 
