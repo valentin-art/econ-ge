@@ -26,7 +26,7 @@ boolean on a sample.
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -82,9 +82,7 @@ class SampleCoverage:
 @dataclass(frozen=True)
 class CollectionCoverage:
     collection: str
-    samples: Mapping[str, SampleCoverage] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    samples: Mapping[str, SampleCoverage]
 
     # Same reasoning as DDISummary/FlagRegistry: `samples` is unhashable, so
     # the frozen=True default __hash__ would only ever fail by accident.
@@ -172,7 +170,6 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
 
         if not data_path.exists() or not ddi_path.exists():
             continue
-        delivered = _delivered_variables(entry, ddi_path)
 
         sample_field = _as_name_list(metadata["samples"])
         variables_field = _as_name_list(metadata["variables"])
@@ -184,6 +181,8 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
                 entry=str(entry)[:200],
             )
             continue
+
+        delivered = _delivered_variables(entry, ddi_path)
 
         for sample in metadata["samples"]:
             requested_by_sample.setdefault(sample, set()).update(metadata["variables"])
@@ -203,7 +202,7 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
         )
         for sample in requested_by_sample
     }
-    return CollectionCoverage(collection=collection, samples=samples)
+    return CollectionCoverage(collection=collection, samples=MappingProxyType(samples))
 
 
 def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:
