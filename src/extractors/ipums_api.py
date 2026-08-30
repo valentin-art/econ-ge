@@ -7,7 +7,7 @@ the data file and its DDI codebook as-is.
 from collections.abc import Collection, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
@@ -37,6 +37,14 @@ log = structlog.get_logger(__name__)
 # Metadata keys find_matching_extract reads without a fallback. A frozenset at
 # module scope rather than a tuple rebuilt on every manifest entry.
 _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"})
+
+
+class CachedExtract(NamedTuple):
+    data_path: Path
+    ddi_path: Path
+    extract_id: int
+    size_bytes: int
+    sha256: str
 
 
 def _default_data_structure() -> dict[str, dict[str, str]]:
@@ -130,7 +138,7 @@ def find_matching_extract(
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
     manifest_entries: Collection[dict[str, Any]] | None = None,
-) -> tuple[Path, Path, int, dict[str, Any]] | None:
+) -> CachedExtract | None:
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
 
@@ -156,9 +164,7 @@ def find_matching_extract(
             re-reads `collection_dir`.
 
     Returns:
-        tuple[Path, Path, int, dict[str, Any]] | None: `(data_path, ddi_path, extract_id)` for
-        the most recent matching entry - the .dat.gz, its DDI codebook, and the
-        IPUMS extract number - or None if no entry matches.
+        CachedExtract
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
@@ -199,7 +205,20 @@ def find_matching_extract(
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
         if data_path.exists() and ddi_path.exists():
-            match = (data_path, ddi_path, int(metadata["extract_id"]), entry)
+            if not {"size_bytes", "sha256"} <= entry.keys():
+                log.warning(
+                    "ipums_manifest_entry_skipped",
+                    reason="missing_size_or_checksum",
+                    entry=str(entry)[:200],
+                )
+                continue
+            match = CachedExtract(
+                data_path,
+                ddi_path,
+                int(metadata["extract_id"]),
+                int(entry["size_bytes"]),
+                str(entry["sha256"]),
+            )
     return match
 
 
@@ -321,12 +340,16 @@ class IPUMSExtractor(Extractor):
             )
         )
         if cached is not None:
-            data_path, ddi_path, extract_id, matched_entry = cached
+            data_path, ddi_path, extract_id = (
+                cached.data_path,
+                cached.ddi_path,
+                cached.extract_id,
+            )
             log.info(
                 "ipums_extract_cached",
                 collection=collection,
-                extract_id=extract_id,
-                file_path=str(data_path),
+                extract_id=cached.extract_id,
+                file_path=str(cached.data_path),
             )
         else:
             microdata_extract = MicrodataExtract(
@@ -413,8 +436,8 @@ class IPUMSExtractor(Extractor):
                 extraction_id=extraction_id,
                 extracted_at=datetime.now(timezone.utc),
                 file_path=data_path,
-                size_bytes=matched_entry["size_bytes"],
-                sha256=matched_entry["sha256"],
+                size_bytes=cached.size_bytes,
+                sha256=cached.sha256,
                 metadata=metadata,
             )
         else:
