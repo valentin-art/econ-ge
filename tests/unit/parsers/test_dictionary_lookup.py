@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.parsers.dictionary_lookup import get_variable_info
+from src.parsers.cps.dictionary_lookup import get_variable_info
 
 
 def _write_dictionary(

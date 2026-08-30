@@ -17,7 +17,7 @@ diverges between them.
 
 Notation: $j$ indexes a BEA Fixed-Assets `LineNumber` (one detailed asset
 type); $s \in \{IT, nonIT\}$ indexes the two capital buckets assigned in
-`src/parsers/asset_dim.py`. Sums over $j \in s$ run over nonresidential
+`src/parsers/bea/asset_dim.py`. Sums over $j \in s$ run over nonresidential
 assets in bucket $s$ only. `ref` = `REF_YEAR` (1990) — the BEA chain-index
 base year.
 

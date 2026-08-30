@@ -11,7 +11,7 @@ from src.config.settings import settings
 from src.config.sources import CPSSource
 from src.extractors.cps import CPSBasicExtractor, CPSExtractor, CPSMWExtractor
 from src.input_output.parquet import read_parquet
-from src.parsers.cps import (
+from src.parsers.cps.parser_cps import (
     build_and_save_variable_dictionary,
     load_variable_dictionary,
     parse_to_bronze,

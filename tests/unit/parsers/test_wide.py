@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.parsers.wide import to_wide
+from src.parsers.bea.wide import to_wide
 
 
 def _long_df() -> pd.DataFrame:

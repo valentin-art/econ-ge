@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.parsers.bea_bronze import (
+from src.parsers.bea.parser_bea import (
     bronze_path,
     load_bea_json,
     parse_bea_json,
