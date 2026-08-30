@@ -79,6 +79,12 @@ class Settings(BaseSettings):
         default=_REPO_ROOT / "config" / "cleaning",
         alias="CLEANING_CONFIG_ROOT",
     )
+    # Sibling of cleaning_config_root - the expected bronze column set per
+    # collection, read by src/config/parsing.py.
+    parsing_config_root: Path = Field(
+        default=_REPO_ROOT / "config" / "parsing",
+        alias="PARSING_CONFIG_ROOT",
+    )
     bea_api_key: str = Field(default="", alias="BEA_API_KEY")
     ipums_api_key: str = Field(default="", alias="IPUMS_API_KEY")
     cps_mw_base_url: str = Field(

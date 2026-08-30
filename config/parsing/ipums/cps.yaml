@@ -1,0 +1,83 @@
+# Expected bronze column set for the IPUMS CPS collection.
+#
+# Read by src/config/parsing.py and handed to the parse pipeline as
+# `expected_columns`. It is the contract every bronze year must satisfy: a
+# year is valid when it holds all of these, and a "new_samples" extract is
+# refused when it would write a year with columns outside them.
+#
+# Editing this is a methodological decision, so it is versioned here rather
+# than derived. Delete this file (or pass no config) to fall back on deriving
+# the set from the years already in bronze.
+#
+# A year may hold MORE than this and still be valid - a variable-delta pulled
+# for some years only leaves them wider, which is not damage. Add a variable
+# here once it has been backfilled for every year.
+#
+# Includes the columns IPUMS attaches on its own: the Q* data-quality flags,
+# the T* topcode flags, and technical/weight columns (CPSID, MONTH, ASECWT)
+# that are delivered without being requested.
+collection: cps
+expected_columns:
+  - ACTNLFLY
+  - AGE
+  - AHRSWORKT
+  - ASECFLAG
+  - ASECWT
+  - ASECWTH
+  - CLASSWLY
+  - CPSID
+  - CPSIDP
+  - CPSIDV
+  - EDUC
+  - EMPSTAT
+  - FULLPART
+  - HFLAG
+  - HISPAN
+  - INCBUS
+  - INCFARM
+  - INCLONGJ
+  - INCWAGE
+  - INDLY
+  - LABFORCE
+  - MARST
+  - MISH
+  - MONTH
+  - OCC
+  - OCCLY
+  - PERNUM
+  - POPSTAT
+  - QACTNLFL
+  - QAGE
+  - QAHRSWORKT
+  - QCLASSWL
+  - QEDUC
+  - QEMPSTAT
+  - QHISPAN
+  - QINCLONG
+  - QINCLONGD
+  - QINCWAGE
+  - QLABFORC
+  - QMARST
+  - QOCC
+  - QOCCLY
+  - QRACE
+  - QRELATE
+  - QSEX
+  - QSRCEARN
+  - QSRCEARND
+  - QUHRSWORKLY
+  - QWHYNWLY
+  - QWKSWORK
+  - RACE
+  - RELATE
+  - SERIAL
+  - SEX
+  - SRCEARN
+  - STATEFIP
+  - TINCFARM
+  - TINCLONGJ
+  - UHRSWORKLY
+  - WHYNWLY
+  - WKSWORK1
+  - WKSWORK2
+  - YEAR
