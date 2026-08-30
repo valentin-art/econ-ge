@@ -113,11 +113,11 @@ def repair(collection: str, years: tuple[int, ...], dry_run: bool) -> None:
             check_bronze_columns(bronze_dir, collection, expected_columns=expected)
         )
     )
-    observed = bronze_columns_by_year(bronze_dir, collection)
 
     if not targets:
         # repair_bronze_years draws this distinction itself, but the early
         # return below means its log never fires through the CLI.
+        observed = bronze_columns_by_year(bronze_dir, collection)
         state = (
             f"no bronze year found under {bronze_dir / collection}"
             if not observed

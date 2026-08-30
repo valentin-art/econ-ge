@@ -34,10 +34,11 @@ def test_missing_config_is_not_an_error(tmp_path: Path) -> None:
 
 def test_config_with_empty_expected_columns_raises_error(tmp_path: Path) -> None:
     path1 = _write_config(tmp_path, {"collection": "cps", "expected_columns": []})
-    path2 = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
 
-    with pytest.raises(ValueError, match="not a list of strings"):
+    with pytest.raises(ValueError, match="declares an empty"):
         load_expected_columns(path1)
+
+    path2 = _write_config(tmp_path, {"collection": "cps", "expected_columns": {}})
     with pytest.raises(ValueError, match="not a list of strings"):
         load_expected_columns(path2)
 
@@ -57,6 +58,15 @@ def test_rejects_expected_columns_that_is_not_a_list_of_strings(
 
     with pytest.raises(ValueError, match="not a list of strings"):
         load_expected_columns(path)
+
+
+def test_load_collection_expected_columns_rejects_a_mismatched_collection(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path, {"collection": "asec", "expected_columns": ["YEAR"]})
+
+    with pytest.raises(ValueError, match="declares collection"):
+        load_collection_expected_columns(tmp_path, "ipums", "cps")
 
 
 def test_rejects_duplicate_columns(tmp_path: Path) -> None:
