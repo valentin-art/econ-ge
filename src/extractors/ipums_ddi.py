@@ -99,9 +99,15 @@ _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def _as_name_list(value: object) -> list[str] | None:
-    """A YAML list of names, or None if the value is any other shape."""
-    if isinstance(value, list) and all(isinstance(v, str) for v in value):
-        return value
+    """A list of names, or None if the value is any other shape.
+
+    Tuples count: YAML hands these fields back as lists, but metadata built
+    in-memory by extract() carries tuples, and summary_from_metadata is called
+    on both. A str is not a sequence of names here - that is the shape this
+    guard exists to reject.
+    """
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        return list(value)
     return None
 
 
@@ -363,7 +369,7 @@ def summary_from_metadata(
         `summary.ddi_path` from this function as a codebook without checking
         `.suffix == ".xml"`.
     """
-    delivered = _as_name_list(metadata["delivered_variables"])
+    delivered = _as_name_list(metadata.get("delivered_variables"))
     if not delivered:
         return None
 

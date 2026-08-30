@@ -149,11 +149,12 @@ def test_extract_reuses_matching_manifest_entry_without_hitting_api(
     assert record.metadata["cached"] is True
     assert record.metadata["extract_id"] == 1
 
-    # append_to_manifest still runs on a cache hit (audit trail of every call,
-    # not just real submissions) - both entries point at the same extract_id.
+    # A cache hit appends nothing: nothing was downloaded, so there is no new
+    # file to record, and a second entry would only re-point at the same
+    # extract_id while growing a file that append_to_manifest rewrites whole.
     manifest_entries = read_manifest(tmp_path / "cps")
-    assert len(manifest_entries) == 2
-    assert all(e["metadata"]["extract_id"] == 1 for e in manifest_entries)
+    assert len(manifest_entries) == 1
+    assert manifest_entries[0]["metadata"]["extract_id"] == 1
 
 
 def test_extract_falls_through_when_variables_not_a_subset(tmp_path: Path) -> None:

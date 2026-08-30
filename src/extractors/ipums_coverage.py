@@ -122,7 +122,7 @@ def _delivered_variables(entry: dict[str, Any], ddi_path: Path) -> tuple[str, ..
     column.
     """
     metadata = entry["metadata"]
-    recorded = _as_name_list(metadata["delivered_variables"])
+    recorded = _as_name_list(metadata.get("delivered_variables"))
     if recorded is not None:
         return tuple(recorded)
 
