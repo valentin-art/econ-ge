@@ -1,6 +1,7 @@
 """Append-only manifest of ExtractionRecords for one external-source directory."""
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -16,7 +17,7 @@ def as_name_list(value: object) -> list[str] | None:
     return None
 
 
-def read_manifest(source_dir: Path) -> list[dict]:
+def read_manifest(source_dir: Path) -> list[dict[str, Any]]:
     """Read source_dir/_MANIFEST.yaml; returns [] if it doesn't exist yet."""
     manifest_path = source_dir / MANIFEST_FILENAME
     if not manifest_path.exists():

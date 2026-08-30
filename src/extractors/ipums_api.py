@@ -164,7 +164,8 @@ def find_matching_extract(
             re-reads `collection_dir`.
 
     Returns:
-        CachedExtract
+        CachedExtract for the most recent matching entry; or None if no entry
+        matches.
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
@@ -204,21 +205,25 @@ def find_matching_extract(
             continue
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
+
         if data_path.exists() and ddi_path.exists():
-            if not {"size_bytes", "sha256"} <= entry.keys():
+            try:
+                candidate = CachedExtract(
+                    data_path,
+                    ddi_path,
+                    int(metadata["extract_id"]),
+                    int(entry["size_bytes"]),
+                    str(entry["sha256"]),
+                )
+            except (KeyError, TypeError, ValueError):
                 log.warning(
                     "ipums_manifest_entry_skipped",
-                    reason="missing_size_or_checksum",
+                    reason="unusable_id_size_or_checksum",
                     entry=str(entry)[:200],
                 )
                 continue
-            match = CachedExtract(
-                data_path,
-                ddi_path,
-                int(metadata["extract_id"]),
-                int(entry["size_bytes"]),
-                str(entry["sha256"]),
-            )
+            match = candidate
+
     return match
 
 
