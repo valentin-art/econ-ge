@@ -8,7 +8,7 @@ IPUMS submission counts against the account's extract quota.
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -117,14 +117,35 @@ def _delivered_variables(entry: dict[str, Any], ddi_path: Path) -> tuple[str, ..
     return tuple(metadata["variables"])
 
 
+@dataclass
+class _SampleAccumulator:
+    """Mutable builder for one SampleCoverage; frozen on the way out."""
+
+    requested: set[str] = field(default_factory=set)
+    delivered: set[str] = field(default_factory=set)
+    extraction_ids: list[str] = field(default_factory=list)
+
+    def add(self, requested, delivered, extraction_id: str) -> None:
+        self.requested.update(requested)
+        self.delivered.update(delivered)
+
+        if extraction_id not in self.extraction_ids:
+            self.extraction_ids.append(extraction_id)
+
+    def freeze(self) -> SampleCoverage:
+        return SampleCoverage(
+            requested_variables=frozenset(self.requested),
+            delivered_variables=frozenset(self.delivered),
+            extraction_ids=tuple(self.extraction_ids),
+        )
+
+
 def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     """Read collection_dir/_MANIFEST.yaml, drop any entry whose data file or
     DDI codebook no longer exists on disk, and union the surviving entries'
     requested and delivered variables into per-sample coverage.
     """
-    requested_by_sample: dict[str, set[str]] = {}
-    delivered_by_sample: dict[str, set[str]] = {}
-    extraction_ids_by_sample: dict[str, list[str]] = {}
+    by_sample: dict[str, _SampleAccumulator] = {}
 
     # file_path and extraction_id are read below without a further guard, and
     # neither can be defaulted: Path("") is Path(".") - which exists - so a
@@ -157,23 +178,11 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
         delivered = _delivered_variables(entry, ddi_path)
 
         for sample in sample_field:
-            requested_by_sample.setdefault(sample, set()).update(variables_field)
-            delivered_by_sample.setdefault(sample, set()).update(delivered)
-            ids = extraction_ids_by_sample.setdefault(sample, [])
-            # extract() appends a manifest entry on every call, including
-            # cache hits that just re-point at an already-recorded
-            # extraction_id - keep each id once, in first-seen order.
-            if entry["extraction_id"] not in ids:
-                ids.append(entry["extraction_id"])
+            by_sample.setdefault(sample, _SampleAccumulator()).add(
+                variables_field, delivered, entry["extraction_id"]
+            )
 
-    samples = {
-        sample: SampleCoverage(
-            requested_variables=frozenset(requested_by_sample[sample]),
-            delivered_variables=frozenset(delivered_by_sample[sample]),
-            extraction_ids=tuple(extraction_ids_by_sample[sample]),
-        )
-        for sample in requested_by_sample
-    }
+    samples = {sample: acc.freeze() for sample, acc in by_sample.items()}
     return CollectionCoverage(collection=collection, samples=MappingProxyType(samples))
 
 
