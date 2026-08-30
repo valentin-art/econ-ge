@@ -30,7 +30,11 @@ from src.extractors.ipums_ddi import (
     collection_flag_registry,
     try_summarize_ddi,
 )
-from src.extractors.manifest import append_to_manifest, read_manifest
+from src.extractors.manifest import (
+    append_to_manifest,
+    iter_valid_entries,
+    read_manifest,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -197,61 +201,54 @@ def find_matching_extract(
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
+    default_structure = _default_data_structure()
     match = None
-    entries = (
-        list(manifest_entries)
-        if manifest_entries is not None
-        else read_manifest(collection_dir)
+
+    valid_entries = iter_valid_entries(
+        collection_dir,
+        required_entry_keys=("file_path",),
+        required_metadata_keys=_REQUIRED_METADATA,
+        entries=manifest_entries,
     )
-    for entry in entries:
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="missing_required_metadata_keys",
-                entry=str(entry)[:200],
-            )
-            continue
-        if "file_path" not in entry:
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="no_file_path",
-                entry=str(entry)[:200],
-            )
-            continue
+
+    for entry, metadata in valid_entries:
         if set(metadata["samples"]) != requested_samples:
             continue
         if not requested_variables <= set(metadata["variables"]):
             continue
         # Entries predating these keys were all pulled with today's defaults
         # (rectangular-on-P, flags on) - verified against the cps manifest.
-        # Treating "absent" as "different" would make every one of them a
-        # permanent cache miss and sends IPUMS request.
-        if metadata.get("data_structure", _default_data_structure()) != data_structure:
+        if metadata.get("data_structure", default_structure) != data_structure:
             continue
+
         if metadata.get("data_quality_flags", True) != data_quality_flags:
             continue
+
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
 
-        if data_path.exists() and ddi_path.exists():
-            try:
-                extract_id = int(metadata["extract_id"])
-            except (KeyError, TypeError, ValueError):
-                log.warning(
-                    "ipums_manifest_entry_skipped",
-                    reason="unusable_extract_id",
-                    entry=str(entry)[:200],
-                )
-                continue
-            size_bytes, sha256 = _recorded_checksum(entry)
-            match = CachedExtract(
-                data_path,
-                ddi_path,
-                extract_id,
-                size_bytes,
-                sha256,
+        if not data_path.exists() or not ddi_path.exists():
+            continue
+
+        try:
+            extract_id = int(metadata["extract_id"])
+        except (KeyError, TypeError, ValueError):
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="unusable_extract_id",
+                entry=str(entry)[:200],
             )
+            continue
+
+        size_bytes, sha256 = _recorded_checksum(entry)
+
+        match = CachedExtract(
+            data_path=data_path,
+            ddi_path=ddi_path,
+            extract_id=extract_id,
+            size_bytes=size_bytes,
+            sha256=sha256,
+        )
 
     return match
 
@@ -348,7 +345,7 @@ class IPUMSExtractor(Extractor):
 
         # Normalization of variables for convenence and to avoid typos in config files.
         variables = tuple(v.upper() for v in variables)
-        # samples = tuple(v.upper() for v in samples)
+        # samples = tuple(v.lower() for v in samples)
 
         # One read, two consumers: the flag registry and the cache lookup.
         # build_coverage (extract_incremental only) still reads for itself.
@@ -559,7 +556,7 @@ class IPUMSExtractor(Extractor):
                 and no new extracts were needed.
         """
         variables = tuple(v.upper() for v in variables)
-        # samples = tuple(v.upper() for v in samples)
+        # samples = tuple(v.lower() for v in samples)
 
         collection_dir = self.storage_dir / collection
         if force:

@@ -532,7 +532,7 @@ def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
     }
 
     assert summary_from_metadata(metadata) is None
-    stale = summary_from_metadata(metadata, require_current_parser=False)
+    stale = summary_from_metadata(metadata, require_current_flag_parser=False)
     assert stale is not None
     assert stale.quality_flags == {"INCWAGE": ("QINCWAGE",)}
 
@@ -661,6 +661,5 @@ def test_collection_flag_registry_survives_a_malformed_entry(
     # ...and it is skipped loudly. Warning for the empty and scalar shapes as
     # well as the non-dict entry is what keeps a corrupted manifest from
     # looking like an empty one.
-    assert [entry["event"] for entry in logs if "malformed" in entry["event"]] == [
-        "ipums_manifest_entry_malformed"
-    ]
+    skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
+    assert [entry["reason"] for entry in skipped] == ["metadata_not_a_mapping"]

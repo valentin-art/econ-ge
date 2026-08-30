@@ -52,7 +52,7 @@ from typing import Any, Literal
 import structlog
 from ipumspy import Codebook, readers
 
-from src.extractors.manifest import as_name_list, read_manifest
+from src.extractors.manifest import as_name_list, iter_valid_entries
 
 log = structlog.get_logger(__name__)
 
@@ -61,7 +61,7 @@ FlagKind = Literal["quality", "topcode"]
 # A version of regex expressions. Increment after each change.
 FLAG_PARSER_VERSION = 1
 
-# Regex expressions aimed to recognize flags
+# Regex expressions aimed to strip a trailing [...]
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "quality": re.compile(
         r"^\s*data\s+quality\s+flags?\s+for\s+(?P<sources>.+)$", re.I
@@ -82,7 +82,7 @@ _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
 
 
 # Regex expression that aims to determine if selected candidate is
-# a valid variable from a manifest
+# a valid variable
 _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -339,7 +339,7 @@ def _as_flag_map(value: object, kind: str) -> dict[str, tuple[str, ...]]:
 
 
 def summary_from_metadata(
-    metadata: Mapping[str, Any], require_current_parser: bool = True
+    metadata: Mapping[str, Any], require_current_flag_parser: bool = True
 ) -> DDISummary | None:
     """Rebuild a DDISummary from what a manifest entry recorded, without
     touching the codebook. None if the entry predates those keys, or if the
@@ -351,12 +351,10 @@ def summary_from_metadata(
     Args:
         metadata (Mapping[str, Any]):
             One manifest entry's `metadata` block. Not mutated.
-        require_current_parser (bool):
-            Reject a flag map not stamped with the current
-            FLAG_PARSER_VERSION. False accepts a stale map, for a caller that
-            has already established there is no codebook to re-derive from -
-            a possibly-outdated answer beats no answer for a heuristic whose
-            only job is "is this name a flag?".
+        require_current_flag_parser (bool):
+            If True - reject a map whose stamp is not exactly FLAG_PARSER_VERSION.
+            If False - accepts a map. For a caller that has no codebook left
+            to re-derive from.
 
     Returns:
         DDISummary, or None if the entry carries nothing usable.
@@ -375,7 +373,7 @@ def summary_from_metadata(
     # next to it on disk is the ground truth, so let the caller re-derive.
     # `!=` rather than `<` is deliberate - it also rejects a map written by a
     # newer checkout, and it is right when YAML hands the stamp back as "1".
-    if require_current_parser and (
+    if require_current_flag_parser and (
         metadata.get("flag_parser_version") != FLAG_PARSER_VERSION
     ):
         return None
@@ -529,41 +527,31 @@ def collection_flag_registry(
     it in rather than re-reading it.
     """
 
-    entries = (
-        list(manifest_entries)
-        if manifest_entries is not None
-        else read_manifest(collection_dir)
+    summaries: list[DDISummary | None] = []
+
+    valid_entries = iter_valid_entries(
+        source_dir=collection_dir,
+        required_entry_keys=(),
+        required_metadata_keys=(),
+        entries=manifest_entries,
     )
 
-    summaries: list[DDISummary | None] = []
-    for entry in entries:
-        # A hand-edited/truncated manifest can carry `metadata:` empty or as a
-        # scalar. This runs on every extract(), so one bad entry must not block
-        # the whole collection.
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict):
-            # Warn for both shapes: a scalar `metadata:` and a stray non-mapping
-            # entry in the YAML list. Silence here is what makes a corrupted
-            # manifest look like an empty one.
-            log.warning(
-                "ipums_manifest_entry_malformed",
-                collection_dir=str(collection_dir),
-                entry=str(entry)[:200],
-            )
-            continue
+    for entry, metadata in valid_entries:
+        # Try to read summaries from metadata
         recorded = summary_from_metadata(metadata)
         if recorded is not None:
             summaries.append(recorded)
             continue
-        # try to read from raw XML-codebooks
+
+        # Try to read from raw XML-codebooks
         ddi_path = metadata.get("ddi_path")
         if ddi_path and Path(ddi_path).exists():
             summaries.append(try_summarize_ddi(Path(ddi_path)))
             continue
-        # Codebook gone and the recorded map stamped out by an older parser:
-        # a stale flag map still beats "this name is not a flag", which costs a
-        # rejected API round trip. Use it - but never silently.
-        stale = summary_from_metadata(metadata, require_current_parser=False)
+
+        # Try to read from raw XML-codebooks accepting old/stale version of
+        # flag parser
+        stale = summary_from_metadata(metadata, require_current_flag_parser=False)
         if stale is not None:
             log.info(
                 "ipums_flag_map_stale_but_used",

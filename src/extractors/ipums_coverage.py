@@ -17,12 +17,11 @@ import structlog
 import yaml
 
 from src.extractors.ipums_ddi import try_summarize_ddi
-from src.extractors.manifest import as_name_list, read_manifest
+from src.extractors.manifest import as_name_list, iter_valid_entries
 
 log = structlog.get_logger(__name__)
 
-# Keys build_coverage reads without a fallback. Kept as frozensets at module
-# scope so the per-entry loop does not rebuild them.
+# Keys build_coverage reads without a fallback.
 _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path"})
 _REQUIRED_ENTRY = frozenset({"file_path", "extraction_id"})
 
@@ -127,26 +126,17 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     delivered_by_sample: dict[str, set[str]] = {}
     extraction_ids_by_sample: dict[str, list[str]] = {}
 
-    for entry in read_manifest(collection_dir):
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="missing_required_metadata_keys",
-                entry=str(entry)[:200],
-            )
-            continue
-        # Both are read below without a further guard, and neither can be
-        # defaulted: Path("") is Path(".") - which exists - so a missing
-        # file_path would sail past the existence check and be counted as
-        # covered, hiding a sample that was never actually downloaded.
-        if not _REQUIRED_ENTRY <= entry.keys():
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="missing_required_entry_keys",
-                entry=str(entry)[:200],
-            )
-            continue
+    # file_path and extraction_id are read below without a further guard, and
+    # neither can be defaulted: Path("") is Path(".") - which exists - so a
+    # missing file_path would sail past the existence check and be counted as
+    # covered, hiding a sample that was never actually downloaded.
+    valid_entries = iter_valid_entries(
+        source_dir=collection_dir,
+        required_entry_keys=_REQUIRED_ENTRY,
+        required_metadata_keys=_REQUIRED_METADATA,
+    )
+
+    for entry, metadata in valid_entries:
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
 

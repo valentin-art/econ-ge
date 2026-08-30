@@ -327,22 +327,22 @@ def _append_raw_entry(collection_dir: Path, entry: dict) -> None:
     [
         pytest.param(
             {"extraction_id": "cps_00002", "metadata": "not-a-mapping"},
-            "missing_required_metadata_keys",
+            "metadata_not_a_mapping",
             id="scalar_metadata",
         ),
         pytest.param(
             {"extraction_id": "cps_00002", "metadata": None},
-            "missing_required_metadata_keys",
+            "metadata_not_a_mapping",
             id="empty_metadata",
         ),
         pytest.param(
             "just-a-string",
-            "missing_required_metadata_keys",
+            "metadata_not_a_mapping",
             id="non_dict_entry",
         ),
         pytest.param(
             {"extraction_id": "cps_00002", "metadata": {"samples": ["cps2007_09s"]}},
-            "missing_required_metadata_keys",
+            "missing_metadata_keys",
             id="partial_metadata",
         ),
         pytest.param(
@@ -356,7 +356,7 @@ def _append_raw_entry(collection_dir: Path, entry: dict) -> None:
                     "ddi_path": "/nonexistent/cps_00002.xml",
                 },
             },
-            "missing_required_entry_keys",
+            "missing_entry_keys",
             id="no_file_path",
         ),
         pytest.param(
@@ -368,7 +368,7 @@ def _append_raw_entry(collection_dir: Path, entry: dict) -> None:
                     "ddi_path": "/nonexistent/cps_00002.xml",
                 },
             },
-            "missing_required_entry_keys",
+            "missing_entry_keys",
             id="no_extraction_id",
         ),
     ],
@@ -392,7 +392,5 @@ def test_build_coverage_skips_a_malformed_entry(
     assert coverage.samples["cps2006_09s"].requested_variables == frozenset(
         {"AGE", "SEX"}
     )
-    skipped = [
-        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
-    ]
+    skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
     assert [entry["reason"] for entry in skipped] == [reason]

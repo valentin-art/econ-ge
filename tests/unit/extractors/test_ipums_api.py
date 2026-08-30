@@ -868,7 +868,7 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
     [
         pytest.param(
             {"extraction_id": "cps_00030", "metadata": "not-a-mapping"},
-            "missing_required_metadata_keys",
+            "metadata_not_a_mapping",
             id="scalar_metadata",
         ),
         pytest.param(
@@ -876,7 +876,7 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
                 "extraction_id": "cps_00030",
                 "metadata": {"samples": ["cps2006_09s"], "variables": ["AGE"]},
             },
-            "missing_required_metadata_keys",
+            "missing_metadata_keys",
             id="partial_metadata",
         ),
         pytest.param(
@@ -888,7 +888,7 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
                     "extract_id": 30,
                 }
             },
-            "no_file_path",
+            "missing_entry_keys",
             id="no_file_path",
         ),
     ],
@@ -916,9 +916,7 @@ def test_find_matching_extract_skips_a_malformed_entry(
         )
 
     assert record.metadata["cached"] is True
-    skipped = [
-        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
-    ]
+    skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
     assert reason in [entry["reason"] for entry in skipped]
 
 
