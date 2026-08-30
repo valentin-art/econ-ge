@@ -323,7 +323,12 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
             error=str(exc),
             exc_info=True,
         )
-        _SUMMARY_CACHE[key] = None
+        # A parse failure is a property of the file and stays true until the file
+        # changes (i.e., mtime/size are in the key). A resource failure is not.
+        # Save info about file reading failure (None value) only
+        # if it is not an environment failure.
+        if not isinstance(exc, (MemoryError, OSError)):
+            _SUMMARY_CACHE[key] = None
         return None
     _SUMMARY_CACHE[key] = summary
     return summary
