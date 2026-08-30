@@ -423,8 +423,8 @@ class IPUMSExtractor(Extractor):
                 file_path=data_path,
                 metadata=metadata,
             )
+            append_to_manifest(collection_dir, record)
 
-        append_to_manifest(collection_dir, record)
         log.info(
             "ipums_extract_complete",
             collection=collection,
