@@ -383,49 +383,15 @@ class IPUMSExtractor(Extractor):
                 file_path=data_path,
             )
         else:
-            microdata_extract = MicrodataExtract(
+            data_path, ddi_path, extract_id = self._submit_and_download(
                 collection=collection,
-                samples=list(samples),
-                variables=list(variables),
+                collection_dir=collection_dir,
+                samples=samples,
+                variables=variables,
                 description=description,
+                data_quality_flags=data_quality_flags,
                 data_structure=effective_data_structure,
             )
-            if data_quality_flags:
-                # Per-variable rather than the extract-level `data_quality_flags=`
-                # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
-                # typo there would silently produce a flagless extract. Assumes IPUMS
-                # ignores the request for variables that have no flag.
-                microdata_extract.add_data_quality_flags(list(variables))
-            try:
-                self.client.submit_extract(microdata_extract)
-            except BadIpumsApiRequest as exc:
-                hint = ""
-                if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
-                    hint = (
-                        "\nIf any of these are IPUMS flag columns, they cannot "
-                        "be requested by name: drop them from `variables` and "
-                        "pass data_quality_flags=True - the flag column is added "
-                        "automatically for every requested variable that has one."
-                    )
-                raise BadIpumsApiRequest(
-                    f"{exc}\n\nRequested samples: {sorted(samples)}\n"
-                    f"Requested variables: {sorted(variables)}{hint}"
-                ) from exc
-
-            self.client.wait_for_extract(microdata_extract)
-            self.client.download_extract(microdata_extract, download_dir=collection_dir)
-            extract_id = microdata_extract.extract_id
-            data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
-            ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
-
-            if not data_path.exists() or not ddi_path.exists():
-                found = sorted(
-                    p.name for p in collection_dir.glob(f"*{extract_id:05d}*")
-                )
-                raise FileNotFoundError(
-                    f"Expected {data_path.name} and {ddi_path.name} after download, "
-                    f"found instead: {found}"
-                )
         metadata = {
             "collection": collection,
             "samples": tuple(samples),
@@ -463,6 +429,7 @@ class IPUMSExtractor(Extractor):
 
         recorded_size = cached.size_bytes if cached is not None else None
         recorded_sha = cached.sha256 if cached is not None else None
+
         if recorded_size is not None and recorded_sha is not None:
             record = ExtractionRecord(
                 source="ipums_api",
@@ -494,6 +461,73 @@ class IPUMSExtractor(Extractor):
             request_kind=request_kind,
         )
         return record
+
+    def _submit_and_download(
+        self,
+        collection_dir: Path,
+        collection: str,
+        samples: Sequence[str],
+        variables: Sequence[str],
+        data_structure: dict[str, dict[str, str]],
+        description: str,
+        data_quality_flags: bool,
+    ) -> tuple[Path, Path, int]:
+        """Submit a new extract, wait for it, and download it to collection_dir.
+
+        Returns:
+            (data_path, ddi_path, extract_id) for the downloaded files.
+
+        Raises:
+            BadIpumsApiRequest: re-raised with the requested samples/variables and,
+                if the message mentions a variable/mnemonic, a hint about flag
+                columns.
+            FileNotFoundError: the download completed but the expected
+                {collection}_{extract_id:05d}.dat.gz/.xml pair is not on disk.
+        """
+
+        microdata_extract = MicrodataExtract(
+            collection=collection,
+            samples=list(samples),
+            variables=list(variables),
+            description=description,
+            data_structure=data_structure,
+        )
+        if data_quality_flags:
+            # Per-variable rather than the extract-level `data_quality_flags=`
+            # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
+            # typo there would silently produce a flagless extract. Assumes IPUMS
+            # ignores the request for variables that have no flag.
+            microdata_extract.add_data_quality_flags(list(variables))
+        try:
+            self.client.submit_extract(microdata_extract)
+        except BadIpumsApiRequest as exc:
+            hint = ""
+            if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
+                hint = (
+                    "\nIf any of these are IPUMS flag columns, they cannot "
+                    "be requested by name: drop them from `variables` and "
+                    "pass data_quality_flags=True - the flag column is added "
+                    "automatically for every requested variable that has one."
+                )
+            raise BadIpumsApiRequest(
+                f"{exc}\n\nRequested samples: {sorted(samples)}\n"
+                f"Requested variables: {sorted(variables)}{hint}"
+            ) from exc
+
+        self.client.wait_for_extract(microdata_extract)
+        self.client.download_extract(microdata_extract, download_dir=collection_dir)
+        extract_id = microdata_extract.extract_id
+        data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
+        ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
+
+        if not data_path.exists() or not ddi_path.exists():
+            found = sorted(p.name for p in collection_dir.glob(f"*{extract_id:05d}*"))
+            raise FileNotFoundError(
+                f"Expected {data_path.name} and {ddi_path.name} after download, "
+                f"found instead: {found}"
+            )
+
+        return data_path, ddi_path, extract_id
 
     def extract_incremental(
         self,
