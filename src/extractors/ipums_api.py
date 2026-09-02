@@ -209,7 +209,7 @@ def find_matching_extract(
 
     valid_entries = iter_valid_entries(
         collection_dir,
-        required_entry_keys=("file_path",),
+        required_entry_keys=("file_path", "extraction_id"),
         required_metadata_keys=_REQUIRED_METADATA,
         entries=manifest_entries,
     )
