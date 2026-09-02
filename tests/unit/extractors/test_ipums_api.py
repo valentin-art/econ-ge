@@ -12,11 +12,15 @@ import hashlib
 from pathlib import Path
 
 import pytest
-import yaml
 import structlog.testing
+import yaml
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
-from src.extractors.ipums_api import IPUMSExtractor
+from src.extractors.ipums_api import (
+    IPUMSExtractor,
+    _default_data_structure,
+    find_matching_extract,
+)
 from src.extractors.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
 from src.extractors.manifest import read_manifest
 
@@ -224,6 +228,31 @@ def test_extract_resubmits_when_the_extract_id_itself_is_unusable(
     )
 
     assert record.metadata["cached"] is False
+    assert len(read_manifest(tmp_path / "cps")) == 2
+
+
+def test_extract_resubmits_when_recorded_size_mismatches_size(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+
+    # Truncate the file
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    data_path.write_bytes(b"f")
+
+    # resubmit
+    extractor.client = _SequentialFakeClient(start_id=2)
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is False
+    assert record.metadata["extract_id"] == 2
+    # Both entries survive - the first is not dropped
     assert len(read_manifest(tmp_path / "cps")) == 2
 
 
@@ -843,6 +872,24 @@ def _seed_cached_entry(tmp_path: Path, make_ddi_xml) -> Path:
         ),
     )
     return collection_dir
+
+
+def test_find_matching_extract_skips_entry_with_mismatched_size(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    collection_dir = _seed_cached_entry(tmp_path, make_ddi_xml)
+    # Corrupt the file
+    (collection_dir / "cps_00029.dat.gz").write_bytes(b"truncated")
+
+    match = find_matching_extract(
+        collection_dir,
+        samples=["cps2006_09s"],
+        variables=["AGE"],
+        data_structure=_default_data_structure(),
+        data_quality_flags=True,
+    )
+
+    assert match is None
 
 
 def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(

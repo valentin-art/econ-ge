@@ -64,11 +64,14 @@ def _default_data_structure() -> dict[str, dict[str, str]]:
 
 def _recorded_checksum(
     entry: dict[str, Any], data_path: Path
-) -> tuple[int, str] | tuple[None, None]:
-    """Size and checksum an entry recorded, or (None, None) if neither is usable.
+) -> tuple[int, str] | tuple[None, None] | None:
+    """Size and checksum an entry recorded; (None, None) if neither is usable;
+    None if the entry disagrees with the file on disk.
 
     (None, None) is not a reason to discard a match: re-reading one local file
-    is cheaper than the extract quota a re-download would spend.
+    is cheaper than the extract quota a re-download would spend. If recorded size
+    disagrees with current file's size, then neither checksum nor size should be
+    trusted - the entry can't be used.
     """
     sha256 = entry.get("sha256")
     # str() would turn a null/absent checksum into the literal "None", so the
@@ -81,9 +84,15 @@ def _recorded_checksum(
         else:
             if size == data_path.stat().st_size:
                 return size, sha256
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="recorded_size_mismatch",
+                entry=str(entry)[:200],
+            )
+            return None
     log.info(
         "ipums_manifest_checksum_recomputed",
-        reason="unusable_or_stale_size_or_checksum",
+        reason="unusable_size_or_checksum",
         entry=str(entry)[:200],
     )
     return (None, None)
@@ -248,7 +257,10 @@ def find_matching_extract(
             )
             continue
 
-        size_bytes, sha256 = _recorded_checksum(entry, data_path)
+        checksum = _recorded_checksum(entry, data_path)
+        if checksum is None:
+            continue
+        size_bytes, sha256 = checksum
 
         match = CachedExtract(
             data_path=data_path,
