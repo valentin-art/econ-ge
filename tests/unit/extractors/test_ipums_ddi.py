@@ -522,6 +522,45 @@ def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_gone(
     ]
 
 
+def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """Broken codebook, stale stamp, and a map that would be correct if the codebook were readable.
+
+    Test case:
+    - cps_00001.xml is a broken cannot be parsed;
+    - cps_00001 is stamped with an old parser version
+    - cps_00001 has a map that would be correct if the codebook were readable;
+    Expected behavior:
+        The registry must use the map and log that it is stale, rather than
+        returning "not a flag" for QINCWAGE.
+    """
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    broken_ddi = collection_dir / "cps_00001.xml"
+    broken_ddi.write_text("<codeBook/>")  # exists, but unreadable - same stub
+    # as test_try_summarize_ddi_returns_none_for_stub_codebook
+    _seed_manifest(
+        collection_dir,
+        broken_ddi,
+        "cps_00001",
+        {
+            "flag_parser_version": FLAG_PARSER_VERSION - 1,
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        },
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+    assert [entry["event"] for entry in logs if "stale" in entry["event"]] == [
+        "ipums_flag_map_stale_but_used"
+    ]
+
+
 def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
     metadata = {
         "ddi_path": "/tmp/cps_00001.xml",

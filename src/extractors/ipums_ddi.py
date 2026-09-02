@@ -517,9 +517,12 @@ def collection_flag_registry(
     """Tries to collect all flags known for `collection_dir`.
 
     Resolution order, cheapest first:
-      1. flag maps recorded in the manifest at download time - no file I/O;
-      2. the codebook itself, for entries written before those keys existed;
-      3. every *.xml in the directory, if there is no manifest at all.
+      1. Flag maps recorded in the manifest at download time - no file I/O;
+      2. The codebook itself, for entries written before those keys existed;
+         or whose recorded map failed the parser-version check;
+      3. A stale-parser version map recorded in the manifest, if the codebook
+         is missing or unreadable;
+      4. Every *.xml in the directory, if there is no manifest at all.
 
     `manifest_entries` lets a caller that has already read _MANIFEST.yaml pass
     it in rather than re-reading it.
@@ -547,7 +550,7 @@ def collection_flag_registry(
             summary = try_summarize_ddi(Path(ddi_path))
             if summary is not None:
                 summaries.append(summary)
-            continue
+                continue
 
         # Try to read from raw XML-codebooks accepting old/stale version of
         # flag parser
