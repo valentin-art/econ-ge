@@ -125,10 +125,12 @@ def _validate_requested_variables(
         return
 
     problems = []
+    flagged: list[str] = []
     for variable in variables:
         kind = registry.kind_of(variable)
         if kind is None:
             continue
+        flagged.append(variable)
         sources = ", ".join(registry.sources_of(variable))
         if kind == "quality":
             problems.append(
@@ -152,7 +154,7 @@ def _validate_requested_variables(
         collection_dir=str(collection_dir),
         # the flagged names, not the whole request - the whole request is what
         # the caller already has, the verdict is what it does not
-        flagged=sorted(v for v in variables if registry.kind_of(v) is not None),
+        flagged=sorted(flagged),
         allowed=allow_flag_variables,
     )
     if allow_flag_variables:
