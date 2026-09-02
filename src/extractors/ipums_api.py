@@ -62,7 +62,9 @@ def _default_data_structure() -> dict[str, dict[str, str]]:
     return {"rectangular": {"on": "P"}}
 
 
-def _recorded_checksum(entry: dict[str, Any]) -> tuple[int, str] | tuple[None, None]:
+def _recorded_checksum(
+    entry: dict[str, Any], data_path: Path
+) -> tuple[int, str] | tuple[None, None]:
     """Size and checksum an entry recorded, or (None, None) if neither is usable.
 
     (None, None) is not a reason to discard a match: re-reading one local file
@@ -73,12 +75,15 @@ def _recorded_checksum(entry: dict[str, Any]) -> tuple[int, str] | tuple[None, N
     # shape is checked rather than coerced. int() does raise, so it is not.
     if isinstance(sha256, str) and sha256:
         try:
-            return int(entry["size_bytes"]), sha256
+            size = int(entry["size_bytes"])
         except (KeyError, TypeError, ValueError):
             pass
+        else:
+            if size == data_path.stat().st_size:
+                return size, sha256
     log.info(
         "ipums_manifest_checksum_recomputed",
-        reason="unusable_size_or_checksum",
+        reason="unusable_or_stale_size_or_checksum",
         entry=str(entry)[:200],
     )
     return (None, None)
@@ -243,7 +248,7 @@ def find_matching_extract(
             )
             continue
 
-        size_bytes, sha256 = _recorded_checksum(entry)
+        size_bytes, sha256 = _recorded_checksum(entry, data_path)
 
         match = CachedExtract(
             data_path=data_path,
