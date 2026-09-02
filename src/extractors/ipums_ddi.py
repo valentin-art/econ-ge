@@ -296,7 +296,7 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
     if key in _SUMMARY_CACHE:
         return _SUMMARY_CACHE[key]
     try:
-        summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
+        summary = summarize_ddi(ddi_path)
     except Exception as exc:
         log.warning(
             "ipums_ddi_unreadable",
