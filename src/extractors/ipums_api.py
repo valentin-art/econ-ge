@@ -514,30 +514,35 @@ class IPUMSExtractor(Extractor):
             )
         extraction_id = f"{collection}_{extract_id:05d}"
 
-        recorded_size = cached.size_bytes if cached is not None else None
-        recorded_sha = cached.sha256 if cached is not None else None
-
-        if recorded_size is not None and recorded_sha is not None:
-            record = ExtractionRecord(
-                source="ipums_api",
-                extraction_id=extraction_id,
-                extracted_at=datetime.now(timezone.utc),
-                file_path=data_path,
-                size_bytes=recorded_size,
-                sha256=recorded_sha,
-                metadata=metadata,
-            )
-        else:
-            # A cache hit whose entry recorded no usable checksum lands here
-            # too - it re-hashes the file it already has, but does not append.
+        if cached is None:
             record = build_extraction_record(
                 source="ipums_api",
                 extraction_id=extraction_id,
                 file_path=data_path,
                 metadata=metadata,
             )
-            if cached is None:
-                append_to_manifest(collection_dir, record)
+            append_to_manifest(collection_dir, record)
+        elif cached.sha256 is not None and cached.size_bytes is not None:
+            # Trust what the entry recorded rather than re-hashing a file that
+            # has not moved. Nothing to append: no new file was written.
+            record = ExtractionRecord(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                extracted_at=datetime.now(timezone.utc),
+                file_path=data_path,
+                size_bytes=cached.size_bytes,
+                sha256=cached.sha256,
+                metadata=metadata,
+            )
+        else:
+            # Cache hit with no usable recorded checksum: re-hash the local file,
+            # still cheaper than the extract quota a re-download would spend.
+            record = build_extraction_record(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                file_path=data_path,
+                metadata=metadata,
+            )
 
         log.info(
             "ipums_extract_complete",
