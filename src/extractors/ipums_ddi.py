@@ -260,15 +260,8 @@ def _cache_key(ddi_path: Path) -> tuple[str, int, int]:
 
 
 def _summarize_and_cache(key: tuple[str, int, int], ddi_path: Path) -> DDISummary:
-    """Helper that summarizes a codebook and caches the result.
-
-    Args:
-        key (tuple[str, int, int]):
-            A cache key for the codebook.
-            ddi_path (Path):
-
-    Returns:
-        DDISummary
+    """Parse and memoize under an already-computed key - the only writer of
+    _SUMMARY_CACHE.
     """
     cached = _SUMMARY_CACHE.get(key)
     if cached is not None:
@@ -575,8 +568,8 @@ def collection_flag_registry(
                 summaries.append(summary)
                 continue
 
-        # Try to read from raw XML-codebooks accepting old/stale version of
-        # flag parser
+        # Codebook gone or unreadable: a stale recorded map still beats
+        # "not a flag", which costs a rejected API round trip.
         stale = summary_from_metadata(metadata, require_current_flag_parser=False)
         if stale is not None:
             log.info(

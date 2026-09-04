@@ -65,6 +65,7 @@ class CollectionCoverage:
     collection: str
     samples: Mapping[str, SampleCoverage]
 
+    # frozen=True stops only the field being reassigned, not its contents mutated; an unhashable field makes the default __hash__ fail by accident.
     def __post_init__(self) -> None:
         object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
 

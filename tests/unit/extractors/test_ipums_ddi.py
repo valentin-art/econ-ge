@@ -525,7 +525,8 @@ def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_gone(
 def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_unreadable(
     tmp_path: Path,
 ) -> None:
-    """Broken codebook, stale stamp, and a map that would be correct if the codebook were readable.
+    """Broken codebook, stale stamp, and a map that would be correct if the codebook
+    were readable.
 
     Test case:
     - cps_00001.xml is a broken cannot be parsed;
