@@ -256,6 +256,25 @@ def test_extract_resubmits_when_recorded_size_mismatches_size(tmp_path: Path) ->
     assert len(read_manifest(tmp_path / "cps")) == 2
 
 
+def test_extract_resubmits_when_size_mismatches_and_checksum_is_null(
+    tmp_path: Path,
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    _corrupt_manifest_checksum(tmp_path / "cps", sha256=None)
+    (tmp_path / "cps" / "cps_00001.dat.gz").write_bytes(b"f")
+
+    extractor.client = _SequentialFakeClient(start_id=2)
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+    assert record.metadata["cached"] is False
+
+
 def test_extract_falls_through_when_variables_not_a_subset(tmp_path: Path) -> None:
     extractor = IPUMSExtractor(
         api_key=_FAKE_API_KEY,
