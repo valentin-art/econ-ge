@@ -1,45 +1,27 @@
-"""Coverage tracking for IPUMS extracts: derives, from _MANIFEST.yaml (cross-
-checked against the .dat.gz/.xml files it references), which samples and
-variables a collection already has on disk, and plans the minimal set of new
-extracts needed to satisfy a bigger request.
+"""What a collection already has on disk, and what a new request still needs.
 
-Pure and network-free - operates only on manifest entries, their DDI codebooks
-and Path.exists() checks, so it's testable without hitting the IPUMS API. Used
-by extractors.ipums_api.IPUMSExtractor.extract_incremental to avoid
-re-submitting extracts that would just duplicate samples/variables already
-pulled (every submit_extract call counts against the user's IPUMS account
-quota).
-
-Coverage distinguishes what was *requested* from what was *delivered*: IPUMS
-returns a flag column for each requested variable that has one, plus technical
-and weight columns nobody asked for. Diffing runs on the requested set, because
-that is what a caller can ask for again; the delivered set is what
-_COVERAGE.yaml reports, because that is what is really in the files.
-
-Coverage is deliberately not aware of data_quality_flags or data_structure.
-Both are request modifiers rather than coverage dimensions: reusing a
-flags-off extract for a flags-on request is already blocked by
-extractors.ipums_api.find_matching_extract, and hierarchical-vs-rectangular
-changes the row grain, which belongs in a separate collection rather than a
-boolean on a sample.
+Folds _MANIFEST.yaml into per-sample coverage - what was requested, and what the
+files actually delivered - and diffs a request against it to plan the minimal
+set of new extracts. Used by IPUMSExtractor.extract_incremental, because every
+IPUMS submission counts against the account's extract quota.
 """
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from types import MappingProxyType
+from typing import Any, Literal
 
 import structlog
 import yaml
 
 from src.extractors.ipums_ddi import try_summarize_ddi
-from src.extractors.manifest import read_manifest
+from src.extractors.manifest import as_name_list, iter_valid_entries
 
 log = structlog.get_logger(__name__)
 
-# Keys build_coverage reads without a fallback. Kept as frozensets at module
-# scope so the per-entry loop does not rebuild them.
+# Keys build_coverage reads without a fallback.
 _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path"})
 _REQUIRED_ENTRY = frozenset({"file_path", "extraction_id"})
 
@@ -81,7 +63,14 @@ class SampleCoverage:
 @dataclass(frozen=True)
 class CollectionCoverage:
     collection: str
-    samples: dict[str, SampleCoverage]
+    samples: Mapping[str, SampleCoverage]
+
+    # frozen=True stops reassignment, not mutation of the dict behind `samples`.
+    # Cost: mappingproxy is not picklable - do not return this from a Dagster op.
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+
+    __hash__ = None  # type: ignore[assignment]
 
     @property
     def requested_variables(self) -> frozenset[str]:
@@ -106,7 +95,7 @@ class CollectionCoverage:
         return frozenset(year for year in years if year is not None)
 
 
-def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
+def _delivered_variables(entry: dict[str, Any], ddi_path: Path) -> tuple[str, ...]:
     """Return the columns that an entry's extract really delivered.
 
     Prefers what the entry recorded at download time. Falls back to the
@@ -115,7 +104,7 @@ def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
     column.
     """
     metadata = entry["metadata"]
-    recorded = metadata.get("delivered_variables")
+    recorded = as_name_list(metadata.get("delivered_variables"))
     if recorded is not None:
         return tuple(recorded)
 
@@ -131,59 +120,72 @@ def _delivered_variables(entry: dict, ddi_path: Path) -> tuple[str, ...]:
     return tuple(metadata["variables"])
 
 
+@dataclass
+class _SampleAccumulator:
+    """Mutable builder for one SampleCoverage; frozen on the way out."""
+
+    requested: set[str] = field(default_factory=set)
+    delivered: set[str] = field(default_factory=set)
+    extraction_ids: list[str] = field(default_factory=list)
+
+    def add(
+        self, requested: Iterable[str], delivered: Iterable[str], extraction_id: str
+    ) -> None:
+        self.requested.update(requested)
+        self.delivered.update(delivered)
+
+        if extraction_id not in self.extraction_ids:
+            self.extraction_ids.append(extraction_id)
+
+    def freeze(self) -> SampleCoverage:
+        return SampleCoverage(
+            requested_variables=frozenset(self.requested),
+            delivered_variables=frozenset(self.delivered),
+            extraction_ids=tuple(self.extraction_ids),
+        )
+
+
 def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     """Read collection_dir/_MANIFEST.yaml, drop any entry whose data file or
     DDI codebook no longer exists on disk, and union the surviving entries'
     requested and delivered variables into per-sample coverage.
     """
-    requested_by_sample: dict[str, set[str]] = {}
-    delivered_by_sample: dict[str, set[str]] = {}
-    extraction_ids_by_sample: dict[str, list[str]] = {}
+    by_sample: dict[str, _SampleAccumulator] = {}
 
-    for entry in read_manifest(collection_dir):
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="missing_required_metadata_keys",
-                entry=str(entry)[:200],
-            )
-            continue
-        # Both are read below without a further guard, and neither can be
-        # defaulted: Path("") is Path(".") - which exists - so a missing
-        # file_path would sail past the existence check and be counted as
-        # covered, hiding a sample that was never actually downloaded.
-        if not _REQUIRED_ENTRY <= entry.keys():
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="missing_required_entry_keys",
-                entry=str(entry)[:200],
-            )
-            continue
+    valid_entries = iter_valid_entries(
+        source_dir=collection_dir,
+        required_entry_keys=_REQUIRED_ENTRY,
+        required_metadata_keys=_REQUIRED_METADATA,
+    )
+
+    for entry, metadata in valid_entries:
+        # A missing file_path would silently pass the exists() check below and
+        # count as a downloaded sample. Path("")=Path(".").
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
 
         if not data_path.exists() or not ddi_path.exists():
             continue
-        delivered = _delivered_variables(entry, ddi_path)
-        for sample in metadata["samples"]:
-            requested_by_sample.setdefault(sample, set()).update(metadata["variables"])
-            delivered_by_sample.setdefault(sample, set()).update(delivered)
-            ids = extraction_ids_by_sample.setdefault(sample, [])
-            # extract() appends a manifest entry on every call, including
-            # cache hits that just re-point at an already-recorded
-            # extraction_id - keep each id once, in first-seen order.
-            if entry["extraction_id"] not in ids:
-                ids.append(entry["extraction_id"])
 
-    samples = {
-        sample: SampleCoverage(
-            requested_variables=frozenset(requested_by_sample[sample]),
-            delivered_variables=frozenset(delivered_by_sample[sample]),
-            extraction_ids=tuple(extraction_ids_by_sample[sample]),
-        )
-        for sample in requested_by_sample
-    }
+        sample_field = as_name_list(metadata["samples"])
+        variables_field = as_name_list(metadata["variables"])
+
+        if sample_field is None or variables_field is None:
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="samples_or_variables_not_a_list_of_names",
+                entry=str(entry)[:200],
+            )
+            continue
+
+        delivered = _delivered_variables(entry, ddi_path)
+
+        for sample in sample_field:
+            by_sample.setdefault(sample, _SampleAccumulator()).add(
+                variables_field, delivered, entry["extraction_id"]
+            )
+
+    samples = {sample: acc.freeze() for sample, acc in by_sample.items()}
     return CollectionCoverage(collection=collection, samples=samples)
 
 
@@ -226,6 +228,27 @@ class PlannedExtract:
     samples: tuple[str, ...]
     variables: tuple[str, ...]
     request_kind: RequestKind
+
+
+def plan_force_requests(
+    coverage: CollectionCoverage,
+    samples: Sequence[str],
+    variables: Sequence[str],
+) -> list[PlannedExtract]:
+    """Force variant of plan_delta_requests: pull every requested variable for
+    every sample, but keep the known/new split so the parse stage merges onto
+    existing bronze columns instead of overwriting them.
+    """
+    all_variables = tuple(variables)
+    new = tuple(s for s in samples if s not in coverage.samples)
+    known = tuple(s for s in samples if s in coverage.samples)
+
+    planned: list[PlannedExtract] = []
+    if new:
+        planned.append(PlannedExtract(new, all_variables, "new_samples"))
+    if known:
+        planned.append(PlannedExtract(known, all_variables, "variable_delta"))
+    return planned
 
 
 def plan_delta_requests(

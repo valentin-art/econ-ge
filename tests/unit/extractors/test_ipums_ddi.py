@@ -220,6 +220,54 @@ def test_try_summarize_ddi_returns_none_for_missing_file(tmp_path: Path) -> None
     assert try_summarize_ddi(tmp_path / "nope.xml") is None
 
 
+def test_try_summarize_ddi_does_not_cache_an_environment_failure(
+    tmp_path: Path, make_ddi_xml, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError says nothing about the file - a dropped mount, too many open
+    handles - so the next call must parse instead of being served the None.
+    """
+    ddi_path = _write_ddi(tmp_path, make_ddi_xml, [("AGE", "Age", 2)])
+    real_read = readers.read_ipums_ddi
+    calls = {"n": 0}
+
+    def failing_once(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("EMFILE")
+        return real_read(path)
+
+    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+
+    assert try_summarize_ddi(ddi_path) is None
+
+    summary = try_summarize_ddi(ddi_path)
+    assert summary is not None
+    assert summary.variables == ("AGE",)
+
+
+def test_try_summarize_ddi_caches_a_parse_failure(
+    tmp_path: Path, make_ddi_xml, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contrast to the OSError case: a file that does not parse stays
+    unparseable until it changes, and mtime/size are already in the cache key.
+    """
+    ddi_path = _write_ddi(tmp_path, make_ddi_xml, [("AGE", "Age", 2)])
+    real_read = readers.read_ipums_ddi
+    calls = {"n": 0}
+
+    def failing_once(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("not a codebook")
+        return real_read(path)
+
+    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+
+    assert try_summarize_ddi(ddi_path) is None
+    assert try_summarize_ddi(ddi_path) is None
+    assert calls["n"] == 1
+
+
 def test_summarize_ddi_raises_for_stub_codebook(tmp_path: Path) -> None:
     stub = tmp_path / "stub.xml"
     stub.write_text("<codeBook/>")
@@ -307,6 +355,71 @@ def test_summary_from_metadata_round_trips_recorded_keys() -> None:
     assert summary is not None
     assert summary.variables == ("INCWAGE", "QINCWAGE")
     assert summary.quality_flags == {"INCWAGE": ("QINCWAGE",)}
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        pytest.param("QINCWAGE", id="scalar_string"),
+        pytest.param(None, id="null"),
+        pytest.param({"nested": "map"}, id="mapping"),
+        pytest.param(["QINCWAGE", 7], id="list_with_non_string"),
+    ],
+)
+def test_summary_from_metadata_rejects_a_flag_map_value_that_is_not_a_name_list(
+    bad_value: object,
+) -> None:
+    # tuple() on a scalar coerces rather than rejects: "QINCWAGE" would become
+    # ('Q','I','N','C',...), which silently drops the real flag column out of
+    # the registry and out of merge_column_names.
+    summary = summary_from_metadata(
+        {
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "flag_parser_version": FLAG_PARSER_VERSION,
+            "ddi_path": "/tmp/x.xml",
+            "quality_flags": {"INCWAGE": bad_value},
+        }
+    )
+
+    assert summary is not None
+    assert dict(summary.quality_flags) == {}
+    assert summary.flag_names == frozenset()
+    assert summary.kind_of("Q") is None
+
+
+def test_summary_from_metadata_logs_which_flag_pairs_it_dropped() -> None:
+    # The dropped pair is invisible in the result - the summary looks merely
+    # smaller - so the log is the only signal that a flag column went missing.
+    with structlog.testing.capture_logs() as logs:
+        summary_from_metadata(
+            {
+                "delivered_variables": ["INCWAGE", "QINCWAGE", "INCFARM"],
+                "flag_parser_version": FLAG_PARSER_VERSION,
+                "ddi_path": "/tmp/x.xml",
+                "quality_flags": {"INCWAGE": ["QINCWAGE"], "INCFARM": "QINCFARM"},
+            }
+        )
+
+    dropped = [
+        entry for entry in logs if entry["event"] == "ipums_flag_map_entries_dropped"
+    ]
+    assert len(dropped) == 1
+    assert dropped[0]["kind"] == "quality"
+    assert dropped[0]["kept"] == ["INCWAGE"]
+
+
+def test_summary_from_metadata_keeps_the_well_formed_pairs_of_a_partial_map() -> None:
+    summary = summary_from_metadata(
+        {
+            "delivered_variables": ["INCWAGE", "QINCWAGE", "INCFARM"],
+            "flag_parser_version": FLAG_PARSER_VERSION,
+            "ddi_path": "/tmp/x.xml",
+            "quality_flags": {"INCWAGE": ["QINCWAGE"], "INCFARM": "QINCFARM"},
+        }
+    )
+
+    assert summary is not None
+    assert dict(summary.quality_flags) == {"INCWAGE": ("QINCWAGE",)}
 
 
 def test_summary_from_metadata_is_none_for_legacy_entry() -> None:
@@ -478,6 +591,46 @@ def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_gone(
     ]
 
 
+def test_collection_flag_registry_uses_a_stale_map_when_the_codebook_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """Broken codebook, stale stamp, and a map that would be correct if the codebook
+    were readable.
+
+    Test case:
+    - cps_00001.xml is a broken cannot be parsed;
+    - cps_00001 is stamped with an old parser version
+    - cps_00001 has a map that would be correct if the codebook were readable;
+    Expected behavior:
+        The registry must use the map and log that it is stale, rather than
+        returning "not a flag" for QINCWAGE.
+    """
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    broken_ddi = collection_dir / "cps_00001.xml"
+    broken_ddi.write_text("<codeBook/>")  # exists, but unreadable - same stub
+    # as test_try_summarize_ddi_returns_none_for_stub_codebook
+    _seed_manifest(
+        collection_dir,
+        broken_ddi,
+        "cps_00001",
+        {
+            "flag_parser_version": FLAG_PARSER_VERSION - 1,
+            "delivered_variables": ["INCWAGE", "QINCWAGE"],
+            "quality_flags": {"INCWAGE": ["QINCWAGE"]},
+            "topcode_flags": {},
+        },
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        registry = collection_flag_registry(collection_dir)
+
+    assert registry.kind_of("QINCWAGE") == "quality"
+    assert [entry["event"] for entry in logs if "stale" in entry["event"]] == [
+        "ipums_flag_map_stale_but_used"
+    ]
+
+
 def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
     metadata = {
         "ddi_path": "/tmp/cps_00001.xml",
@@ -488,7 +641,7 @@ def test_summary_from_metadata_can_opt_out_of_the_version_check() -> None:
     }
 
     assert summary_from_metadata(metadata) is None
-    stale = summary_from_metadata(metadata, require_current_parser=False)
+    stale = summary_from_metadata(metadata, require_current_flag_parser=False)
     assert stale is not None
     assert stale.quality_flags == {"INCWAGE": ("QINCWAGE",)}
 
@@ -617,6 +770,5 @@ def test_collection_flag_registry_survives_a_malformed_entry(
     # ...and it is skipped loudly. Warning for the empty and scalar shapes as
     # well as the non-dict entry is what keeps a corrupted manifest from
     # looking like an empty one.
-    assert [entry["event"] for entry in logs if "malformed" in entry["event"]] == [
-        "ipums_manifest_entry_malformed"
-    ]
+    skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
+    assert [entry["reason"] for entry in skipped] == ["metadata_not_a_mapping"]

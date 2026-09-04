@@ -8,13 +8,19 @@ commented out - uncomment it and run manually (with a real IPUMS_API_KEY
 configured) to confirm live connectivity beyond what the tests below cover.
 """
 
+import hashlib
 from pathlib import Path
 
 import pytest
 import structlog.testing
+import yaml
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
-from src.extractors.ipums_api import IPUMSExtractor
+from src.extractors.ipums_api import (
+    IPUMSExtractor,
+    _default_data_structure,
+    find_matching_extract,
+)
 from src.extractors.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
 from src.extractors.manifest import read_manifest
 
@@ -149,11 +155,127 @@ def test_extract_reuses_matching_manifest_entry_without_hitting_api(
     assert record.metadata["cached"] is True
     assert record.metadata["extract_id"] == 1
 
-    # append_to_manifest still runs on a cache hit (audit trail of every call,
-    # not just real submissions) - both entries point at the same extract_id.
+    # A cache hit appends nothing: nothing was downloaded, so there is no new
+    # file to record, and a second entry would only re-point at the same
+    # extract_id while growing a file that append_to_manifest rewrites whole.
     manifest_entries = read_manifest(tmp_path / "cps")
-    assert len(manifest_entries) == 2
-    assert all(e["metadata"]["extract_id"] == 1 for e in manifest_entries)
+    assert len(manifest_entries) == 1
+    assert manifest_entries[0]["metadata"]["extract_id"] == 1
+
+
+def _corrupt_manifest_checksum(collection_dir: Path, **fields: object) -> None:
+    """Rewrite the sole manifest entry's size/checksum fields in place."""
+    manifest_path = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest_path.read_text())
+    entries[0].update(fields)
+    manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        pytest.param({"size_bytes": "not-a-number"}, id="unparseable_size"),
+        pytest.param({"sha256": None}, id="null_checksum"),
+        pytest.param({"size_bytes": None, "sha256": None}, id="both_null"),
+        # A checksum with no size is unusable on its own: nothing has been
+        # checked against the file, so the recorded hash is not evidence.
+        pytest.param({"size_bytes": None}, id="null_size_valid_checksum"),
+    ],
+)
+def test_extract_recomputes_checksum_rather_than_resubmitting(
+    tmp_path: Path, corruption: dict
+) -> None:
+    # An entry that matches on everything but carries no usable checksum is
+    # still a cache hit: re-hashing the local file beats spending an IPUMS
+    # extract on a re-download of a file already on disk.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    _corrupt_manifest_checksum(tmp_path / "cps", **corruption)
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is True
+    # Recomputed from the file on disk, not carried over from the entry.
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    assert record.size_bytes == data_path.stat().st_size
+    assert record.sha256 == hashlib.sha256(data_path.read_bytes()).hexdigest()
+    # Still a cache hit, so still no new manifest entry.
+    assert len(read_manifest(tmp_path / "cps")) == 1
+
+
+def test_extract_resubmits_when_the_extract_id_itself_is_unusable(
+    tmp_path: Path,
+) -> None:
+    # extract_id is not recoverable from the file - it names the download and
+    # the extraction_id - so an unusable one is still a hard skip.
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    manifest_path = tmp_path / "cps" / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest_path.read_text())
+    entries[0]["metadata"]["extract_id"] = "not-a-number"
+    manifest_path.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is False
+    assert len(read_manifest(tmp_path / "cps")) == 2
+
+
+def test_extract_resubmits_when_recorded_size_mismatches_size(tmp_path: Path) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+
+    # Truncate the file
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    data_path.write_bytes(b"f")
+
+    # resubmit
+    extractor.client = _SequentialFakeClient(start_id=2)
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is False
+    assert record.metadata["extract_id"] == 2
+    # Both entries survive - the first is not dropped
+    assert len(read_manifest(tmp_path / "cps")) == 2
+
+
+def test_extract_resubmits_when_size_mismatches_and_checksum_is_null(
+    tmp_path: Path,
+) -> None:
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    _corrupt_manifest_checksum(tmp_path / "cps", sha256=None)
+    (tmp_path / "cps" / "cps_00001.dat.gz").write_bytes(b"f")
+
+    extractor.client = _SequentialFakeClient(start_id=2)
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+    assert record.metadata["cached"] is False
 
 
 def test_extract_falls_through_when_variables_not_a_subset(tmp_path: Path) -> None:
@@ -774,6 +896,24 @@ def _seed_cached_entry(tmp_path: Path, make_ddi_xml) -> Path:
     return collection_dir
 
 
+def test_find_matching_extract_skips_entry_with_mismatched_size(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    collection_dir = _seed_cached_entry(tmp_path, make_ddi_xml)
+    # Corrupt the file
+    (collection_dir / "cps_00029.dat.gz").write_bytes(b"truncated")
+
+    match = find_matching_extract(
+        collection_dir,
+        samples=["cps2006_09s"],
+        variables=["AGE"],
+        data_structure=_default_data_structure(),
+        data_quality_flags=True,
+    )
+
+    assert match is None
+
+
 def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
     tmp_path: Path, make_ddi_xml
 ) -> None:
@@ -797,7 +937,7 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
     [
         pytest.param(
             {"extraction_id": "cps_00030", "metadata": "not-a-mapping"},
-            "missing_required_metadata_keys",
+            "metadata_not_a_mapping",
             id="scalar_metadata",
         ),
         pytest.param(
@@ -805,7 +945,7 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
                 "extraction_id": "cps_00030",
                 "metadata": {"samples": ["cps2006_09s"], "variables": ["AGE"]},
             },
-            "missing_required_metadata_keys",
+            "missing_metadata_keys",
             id="partial_metadata",
         ),
         pytest.param(
@@ -817,8 +957,24 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
                     "extract_id": 30,
                 }
             },
-            "no_file_path",
+            "missing_entry_keys",
             id="no_file_path",
+        ),
+        pytest.param(
+            # build_coverage requires extraction_id too. If the cache accepted
+            # an entry the planner cannot see, extract_incremental would keep
+            # re-planning a sample it already has and never converge.
+            {
+                "file_path": "/nonexistent/cps_00030.dat.gz",
+                "metadata": {
+                    "samples": ["cps2006_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/cps_00030.xml",
+                    "extract_id": 30,
+                },
+            },
+            "missing_entry_keys",
+            id="no_extraction_id",
         ),
     ],
 )
@@ -845,10 +1001,104 @@ def test_find_matching_extract_skips_a_malformed_entry(
         )
 
     assert record.metadata["cached"] is True
-    skipped = [
-        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
-    ]
+    skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
     assert reason in [entry["reason"] for entry in skipped]
+
+
+def test_find_matching_extract_returns_the_newest_of_two_matching_entries(
+    tmp_path: Path,
+) -> None:
+    """Two entries match equally well; the later one wins. `reversed` is what
+    makes that true, and nothing else in the suite fails if it is dropped.
+    """
+    client = _SequentialFakeClient(start_id=1)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"], force=True
+    )
+    assert len(read_manifest(tmp_path / "cps")) == 2
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is True
+    assert record.metadata["extract_id"] == 2
+
+
+def test_find_matching_extract_skips_an_entry_whose_samples_are_not_a_list(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """A bare string passes iter_valid_entries - the key is present - so the
+    shape check inside the match loop is the only thing rejecting it. Without
+    it, set("cps2006_09s") compares characters and never matches.
+    """
+    collection_dir = _seed_cached_entry(tmp_path, make_ddi_xml)
+    manifest = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest.read_text())
+    entries.append(
+        {
+            "extraction_id": "cps_00030",
+            "file_path": "/nonexistent/cps_00030.dat.gz",
+            "metadata": {
+                "samples": "cps2006_09s",
+                "variables": ["AGE"],
+                "ddi_path": "/nonexistent/cps_00030.xml",
+                "extract_id": 30,
+            },
+        }
+    )
+    manifest.write_text(yaml.safe_dump(entries, sort_keys=False))
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_ClientMustNotBeCalled()
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        record = extractor.extract(
+            collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+        )
+
+    assert record.metadata["cached"] is True
+    # Still the old event name: iter_valid_entries emits "manifest_entry_skipped",
+    # the shape checks left in this loop emit "ipums_manifest_entry_skipped".
+    # Update this together with that rename.
+    assert "samples_or_variables_not_a_list_of_names" in [
+        entry.get("reason")
+        for entry in logs
+        if entry["event"] == "ipums_manifest_entry_skipped"
+    ]
+
+
+def test_extract_carries_over_the_recorded_checksum_without_rehashing(
+    tmp_path: Path,
+) -> None:
+    """The size-matched branch trusts what the entry recorded. Pinned with a
+    checksum that is wrong on purpose: a re-hash would overwrite it, so the
+    bogus value surviving is the proof no re-hash happened.
+    """
+    bogus_sha = "0" * 64  # pragma: allowlist secret
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    # Size left alone - only a matching size reaches this branch at all.
+    _corrupt_manifest_checksum(tmp_path / "cps", sha256=bogus_sha)
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    assert record.metadata["cached"] is True
+    assert record.sha256 == bogus_sha
+    assert record.sha256 != hashlib.sha256(data_path.read_bytes()).hexdigest()
 
 
 def test_find_matching_extract_misses_when_flags_explicitly_differ(

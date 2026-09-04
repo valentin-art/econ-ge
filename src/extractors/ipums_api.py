@@ -5,7 +5,9 @@ the data file and its DDI codebook as-is.
 """
 
 from collections.abc import Collection, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, NamedTuple
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
@@ -21,6 +23,7 @@ from src.extractors.ipums_coverage import (
     RequestKind,
     build_coverage,
     plan_delta_requests,
+    plan_force_requests,
     save_coverage,
 )
 from src.extractors.ipums_ddi import (
@@ -28,7 +31,12 @@ from src.extractors.ipums_ddi import (
     collection_flag_registry,
     try_summarize_ddi,
 )
-from src.extractors.manifest import append_to_manifest, read_manifest
+from src.extractors.manifest import (
+    append_to_manifest,
+    as_name_list,
+    iter_valid_entries,
+    read_manifest,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -37,14 +45,68 @@ log = structlog.get_logger(__name__)
 _REQUIRED_METADATA = frozenset({"samples", "variables", "ddi_path", "extract_id"})
 
 
+class CachedExtract(NamedTuple):
+    """Contains information about cached data extract.
+
+    size_bytes and sha256 come from manifest, not recomputed. Both are None if
+    the entry recorded neither usably - the file is still reused, and the
+    checksum is recomputed from disk."""
+
+    data_path: Path
+    ddi_path: Path
+    extract_id: int
+    size_bytes: int | None
+    sha256: str | None
+
+
 def _default_data_structure() -> dict[str, dict[str, str]]:
     return {"rectangular": {"on": "P"}}
+
+
+def _recorded_checksum(
+    entry: dict[str, Any], data_path: Path
+) -> tuple[int, str] | tuple[None, None] | None:
+    """Size and checksum an entry recorded; (None, None) if neither is usable;
+    None if the entry disagrees with the file on disk.
+
+    If recorded size disagrees with current file's size, then neither checksum nor size should be trusted - the entry can't be used. If size agrees, then check if the recorded checksum is a usable string.
+    """
+    try:
+        size: int | None = int(entry["size_bytes"])
+    except (KeyError, TypeError, ValueError):
+        size = None
+
+    # A recorded size that disagrees with the file rejects the entry whether or
+    # not a checksum came with it - the file is what a re-download would replace.
+    on_disk = data_path.stat().st_size
+    if size is not None and size != on_disk:
+        log.error(
+            "ipums_data_file_size_mismatch",
+            file_path=str(data_path),
+            recorded_size=size,
+            size_on_disk=on_disk,
+            entry=str(entry)[:200],
+        )
+        return None
+
+    sha256 = entry.get("sha256")
+    # str() would turn a null/absent checksum into the literal "None", so the
+    # shape is checked rather than coerced. int() does raise, so it is not.
+    if size is not None and isinstance(sha256, str) and sha256:
+        return size, sha256
+
+    log.info(
+        "ipums_manifest_checksum_recomputed",
+        reason="unusable_size_or_checksum",
+        entry=str(entry)[:200],
+    )
+    return (None, None)
 
 
 def _validate_requested_variables(
     collection_dir: Path,
     variables: Sequence[str],
-    manifest_entries: Collection[dict] | None = None,
+    manifest_entries: Collection[dict[str, Any]] | None = None,
     allow_flag_variables: bool = False,
 ) -> None:
     """Raise ValueError if any requested variable is a flag column.
@@ -60,7 +122,7 @@ def _validate_requested_variables(
             Path to collection's dir containing _MANIFEST.yaml.
         variables (Sequence[str]):
             IPUMS variable names, e.g. ["AGE", "SEX"].
-        manifest_entries (Collection[dict] | None):
+        manifest_entries (Collection[dict[str, Any]] | None):
             Already-read _MANIFEST.yaml entries, to save a second read. None
             re-reads `collection_dir`.
         allow_flag_variables (bool):
@@ -81,11 +143,13 @@ def _validate_requested_variables(
     if not registry:
         return
 
-    problems = []
+    problems: list[str] = []
+    flagged: list[str] = []
     for variable in variables:
         kind = registry.kind_of(variable)
         if kind is None:
             continue
+        flagged.append(variable)
         sources = ", ".join(registry.sources_of(variable))
         if kind == "quality":
             problems.append(
@@ -109,7 +173,7 @@ def _validate_requested_variables(
         collection_dir=str(collection_dir),
         # the flagged names, not the whole request - the whole request is what
         # the caller already has, the verdict is what it does not
-        flagged=sorted(v for v in variables if registry.kind_of(v) is not None),
+        flagged=sorted(flagged),
         allowed=allow_flag_variables,
     )
     if allow_flag_variables:
@@ -127,8 +191,8 @@ def find_matching_extract(
     variables: Sequence[str],
     data_structure: dict[str, dict[str, str]],
     data_quality_flags: bool,
-    manifest_entries: Collection[dict] | None = None,
-) -> tuple[Path, Path, int] | None:
+    manifest_entries: Collection[dict[str, Any]] | None = None,
+) -> CachedExtract | None:
     """Compares the requested (samples, variables) against the manifest entries
     (as function arguments) in given collection.
 
@@ -149,56 +213,80 @@ def find_matching_extract(
             A form of data pulled: Hierarchical or rectangular data.
         data_quality_flags (bool):
             Whether to pull IPUMS Data quality flags.
-        manifest_entries (Collection[dict] | None):
+        manifest_entries (Collection[dict[str, Any]] | None):
             Already-read _MANIFEST.yaml entries, to save a second read. None
             re-reads `collection_dir`.
 
     Returns:
-        tuple[Path, Path, int] | None: `(data_path, ddi_path, extract_id)` for
-        the most recent matching entry - the .dat.gz, its DDI codebook, and the
-        IPUMS extract number - or None if no entry matches.
+        CachedExtract for the most recent matching entry; or None if no entry
+        matches.
     """
     requested_samples = set(samples)
     requested_variables = set(variables)
-    match = None
-    entries = (
-        list(manifest_entries)
-        if manifest_entries is not None
-        else read_manifest(collection_dir)
+    default_structure = _default_data_structure()
+
+    valid_entries = iter_valid_entries(
+        collection_dir,
+        required_entry_keys=("file_path", "extraction_id"),
+        required_metadata_keys=_REQUIRED_METADATA,
+        entries=manifest_entries,
     )
-    for entry in entries:
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict) or not _REQUIRED_METADATA <= metadata.keys():
+
+    for entry, metadata in reversed(list(valid_entries)):
+        entry_samples = as_name_list(metadata["samples"])
+        entry_variables = as_name_list(metadata["variables"])
+
+        if entry_samples is None or entry_variables is None:
             log.warning(
                 "ipums_manifest_entry_skipped",
-                reason="missing_required_metadata_keys",
+                reason="samples_or_variables_not_a_list_of_names",
                 entry=str(entry)[:200],
             )
             continue
-        if "file_path" not in entry:
-            log.warning(
-                "ipums_manifest_entry_skipped",
-                reason="no_file_path",
-                entry=str(entry)[:200],
-            )
+
+        if set(entry_samples) != requested_samples:
             continue
-        if set(metadata["samples"]) != requested_samples:
+        if not requested_variables <= set(entry_variables):
             continue
-        if not requested_variables <= set(metadata["variables"]):
-            continue
+
         # Entries predating these keys were all pulled with today's defaults
         # (rectangular-on-P, flags on) - verified against the cps manifest.
-        # Treating "absent" as "different" would make every one of them a
-        # permanent cache miss and sends IPUMS request.
-        if metadata.get("data_structure", _default_data_structure()) != data_structure:
+        if metadata.get("data_structure", default_structure) != data_structure:
             continue
+
         if metadata.get("data_quality_flags", True) != data_quality_flags:
             continue
+
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
-        if data_path.exists() and ddi_path.exists():
-            match = (data_path, ddi_path, metadata["extract_id"])
-    return match
+
+        if not data_path.exists() or not ddi_path.exists():
+            continue
+
+        try:
+            extract_id = int(metadata["extract_id"])
+        except (TypeError, ValueError):
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="unusable_extract_id",
+                entry=str(entry)[:200],
+            )
+            continue
+
+        checksum = _recorded_checksum(entry, data_path)
+        if checksum is None:
+            continue
+        size_bytes, sha256 = checksum
+
+        return CachedExtract(
+            data_path=data_path,
+            ddi_path=ddi_path,
+            extract_id=extract_id,
+            size_bytes=size_bytes,
+            sha256=sha256,
+        )
+
+    return None
 
 
 class IPUMSExtractor(Extractor):
@@ -225,6 +313,73 @@ class IPUMSExtractor(Extractor):
         self.client = (
             client if client is not None else IpumsApiClient(api_key=self.api_key)
         )
+
+    def _submit_and_download(
+        self,
+        collection_dir: Path,
+        collection: str,
+        samples: Sequence[str],
+        variables: Sequence[str],
+        data_structure: dict[str, dict[str, str]],
+        description: str,
+        data_quality_flags: bool,
+    ) -> tuple[Path, Path, int]:
+        """Submit a new extract, wait for it, and download it to collection_dir.
+
+        Returns:
+            (data_path, ddi_path, extract_id) for the downloaded files.
+
+        Raises:
+            BadIpumsApiRequest: re-raised with the requested samples/variables and,
+                if the message mentions a variable/mnemonic, a hint about flag
+                columns.
+            FileNotFoundError: the download completed but the expected
+                {collection}_{extract_id:05d}.dat.gz/.xml pair is not on disk.
+        """
+
+        microdata_extract = MicrodataExtract(
+            collection=collection,
+            samples=list(samples),
+            variables=list(variables),
+            description=description,
+            data_structure=data_structure,
+        )
+        if data_quality_flags:
+            # Per-variable rather than the extract-level `data_quality_flags=`
+            # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
+            # typo there would silently produce a flagless extract. Assumes IPUMS
+            # ignores the request for variables that have no flag.
+            microdata_extract.add_data_quality_flags(list(variables))
+        try:
+            self.client.submit_extract(microdata_extract)
+        except BadIpumsApiRequest as exc:
+            hint = ""
+            if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
+                hint = (
+                    "\nIf any of these are IPUMS flag columns, they cannot "
+                    "be requested by name: drop them from `variables` and "
+                    "pass data_quality_flags=True - the flag column is added "
+                    "automatically for every requested variable that has one."
+                )
+            raise BadIpumsApiRequest(
+                f"{exc}\n\nRequested samples: {sorted(samples)}\n"
+                f"Requested variables: {sorted(variables)}{hint}"
+            ) from exc
+
+        self.client.wait_for_extract(microdata_extract)
+        self.client.download_extract(microdata_extract, download_dir=collection_dir)
+        extract_id = microdata_extract.extract_id
+        data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
+        ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
+
+        if not data_path.exists() or not ddi_path.exists():
+            found = sorted(p.name for p in collection_dir.glob(f"*{extract_id:05d}*"))
+            raise FileNotFoundError(
+                f"Expected {data_path.name} and {ddi_path.name} after download, "
+                f"found instead: {found}"
+            )
+
+        return data_path, ddi_path, extract_id
 
     def extract(
         self,
@@ -290,11 +445,11 @@ class IPUMSExtractor(Extractor):
         )
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
-        # ipumspy upper-cases Variable.name on construction, and
-        # add_data_quality_flags resolves by exact string match - so normalize
-        # before anything looks a name up, or a lower-case request silently
-        # yields a flagless extract.
+
+        # Normalization of variables names. Affects variables lookup in the manifest
+        # and the flag registry, and the request to the API.
         variables = tuple(v.upper() for v in variables)
+
         # One read, two consumers: the flag registry and the cache lookup.
         # build_coverage (extract_incremental only) still reads for itself.
         manifest_entries = read_manifest(collection_dir)
@@ -319,7 +474,11 @@ class IPUMSExtractor(Extractor):
             )
         )
         if cached is not None:
-            data_path, ddi_path, extract_id = cached
+            data_path, ddi_path, extract_id = (
+                cached.data_path,
+                cached.ddi_path,
+                cached.extract_id,
+            )
             log.info(
                 "ipums_extract_cached",
                 collection=collection,
@@ -327,49 +486,15 @@ class IPUMSExtractor(Extractor):
                 file_path=str(data_path),
             )
         else:
-            microdata_extract = MicrodataExtract(
+            data_path, ddi_path, extract_id = self._submit_and_download(
                 collection=collection,
-                samples=list(samples),
-                variables=list(variables),
+                collection_dir=collection_dir,
+                samples=samples,
+                variables=variables,
                 description=description,
+                data_quality_flags=data_quality_flags,
                 data_structure=effective_data_structure,
             )
-            if data_quality_flags:
-                # Per-variable rather than the extract-level `data_quality_flags=`
-                # kwarg: ipumspy forwards unknown kwargs to the API unvalidated, so a
-                # typo there would silently produce a flagless extract. Assumes IPUMS
-                # ignores the request for variables that have no flag.
-                microdata_extract.add_data_quality_flags(list(variables))
-            try:
-                self.client.submit_extract(microdata_extract)
-            except BadIpumsApiRequest as exc:
-                hint = ""
-                if "mnemonic" in str(exc).lower() or "variable" in str(exc).lower():
-                    hint = (
-                        "\nIf any of these are IPUMS flag columns, they cannot "
-                        "be requested by name: drop them from `variables` and "
-                        "pass data_quality_flags=True - the flag column is added "
-                        "automatically for every requested variable that has one."
-                    )
-                raise BadIpumsApiRequest(
-                    f"{exc}\n\nRequested samples: {sorted(samples)}\n"
-                    f"Requested variables: {sorted(variables)}{hint}"
-                ) from exc
-
-            self.client.wait_for_extract(microdata_extract)
-            self.client.download_extract(microdata_extract, download_dir=collection_dir)
-            extract_id = microdata_extract.extract_id
-            data_path = collection_dir / f"{collection}_{extract_id:05d}.dat.gz"
-            ddi_path = collection_dir / f"{collection}_{extract_id:05d}.xml"
-
-            if not data_path.exists() or not ddi_path.exists():
-                found = sorted(
-                    p.name for p in collection_dir.glob(f"*{extract_id:05d}*")
-                )
-                raise FileNotFoundError(
-                    f"Expected {data_path.name} and {ddi_path.name} after download, "
-                    f"found instead: {found}"
-                )
         metadata = {
             "collection": collection,
             "samples": tuple(samples),
@@ -404,13 +529,37 @@ class IPUMSExtractor(Extractor):
                 ddi_path=str(ddi_path),
             )
         extraction_id = f"{collection}_{extract_id:05d}"
-        record = build_extraction_record(
-            source="ipums_api",
-            extraction_id=extraction_id,
-            file_path=data_path,
-            metadata=metadata,
-        )
-        append_to_manifest(collection_dir, record)
+
+        if cached is None:
+            record = build_extraction_record(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                file_path=data_path,
+                metadata=metadata,
+            )
+            append_to_manifest(collection_dir, record)
+        elif cached.sha256 is not None and cached.size_bytes is not None:
+            # Trust what the entry recorded rather than re-hashing a file that
+            # has not moved. Nothing to append: no new file was written.
+            record = ExtractionRecord(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                extracted_at=datetime.now(timezone.utc),
+                file_path=data_path,
+                size_bytes=cached.size_bytes,
+                sha256=cached.sha256,
+                metadata=metadata,
+            )
+        else:
+            # Cache hit with no usable recorded checksum: re-hash the local file,
+            # still cheaper than the extract quota a re-download would spend.
+            record = build_extraction_record(
+                source="ipums_api",
+                extraction_id=extraction_id,
+                file_path=data_path,
+                metadata=metadata,
+            )
+
         log.info(
             "ipums_extract_complete",
             collection=collection,
@@ -451,7 +600,6 @@ class IPUMSExtractor(Extractor):
         existing bronze columns instead of overwriting the whole file), and
         genuinely new samples as a "new_samples" force-pull - one or two
         extracts, mirroring extract(force=True) per group.
-        With force=True, two extracts may be submitted.
 
         Args:
             collection (str):
@@ -482,40 +630,15 @@ class IPUMSExtractor(Extractor):
                 and no new extracts were needed.
         """
         variables = tuple(v.upper() for v in variables)
-        collection_dir = self.storage_dir / collection
-        if force:
-            coverage = build_coverage(collection_dir, collection)
-            # Force means "pull it regardless of whether plan_delta_requests
-            # would think it's needed"
-            known_samples = [s for s in samples if s in coverage.samples]
-            new_samples = [s for s in samples if s not in coverage.samples]
-            groups: list[tuple[list[str], RequestKind]] = []
-            if new_samples:
-                groups.append((new_samples, "new_samples"))
-            if known_samples:
-                groups.append((known_samples, "variable_delta"))
-            records = [
-                self.extract(
-                    collection=collection,
-                    samples=group_samples,
-                    variables=variables,
-                    data_quality_flags=data_quality_flags,
-                    data_structure=data_structure,
-                    description=description,
-                    request_kind=request_kind,
-                    force=True,
-                    allow_flag_variables=allow_flag_variables,
-                )
-                for group_samples, request_kind in groups
-            ]
-            if records:
-                save_coverage(
-                    build_coverage(collection_dir, collection), collection_dir
-                )
-            return records
 
+        collection_dir = self.storage_dir / collection
         coverage = build_coverage(collection_dir, collection)
-        planned = plan_delta_requests(coverage, samples, variables)
+        planned = (
+            plan_force_requests(coverage, samples, variables)
+            if force
+            else plan_delta_requests(coverage, samples, variables)
+        )
+
         if not planned:
             log.info(
                 "ipums_extract_already_covered",
@@ -535,6 +658,7 @@ class IPUMSExtractor(Extractor):
                 data_quality_flags=data_quality_flags,
                 data_structure=data_structure,
                 allow_flag_variables=allow_flag_variables,
+                force=force,
             )
             for plan in planned
         ]

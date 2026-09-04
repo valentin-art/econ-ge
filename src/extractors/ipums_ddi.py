@@ -52,28 +52,33 @@ from typing import Any, Literal
 import structlog
 from ipumspy import Codebook, readers
 
-from src.extractors.manifest import read_manifest
+from src.extractors.manifest import as_name_list, iter_valid_entries
 
 log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
 
-# Bump whenever parse_flag_label or its regexes change. extract() stamps this
-# into every manifest entry it writes; a recorded flag map carrying a different
-# stamp is ignored and re-derived from the codebook, so a parser fix reaches
-# entries written before it.
+# A flag that tracks parsers version. Increment on a change to parse_flag_label's
+# regexes - not on a change to how variable names are extracted from the codebook
+# (a separate, simpler loop that this version does not gate).
 #
-# The stamp gates only the flag maps read back by summary_from_metadata.
-# ipums_coverage._delivered_variables trusts a recorded `delivered_variables`
-# list regardless of version, so changing how _summarize_codebook enumerates
-# columns needs its own decision - this constant does not cover it.
+# NOTE: nothing rewrites an existing entry's stamp. extract() appends only on a
+# real download (see ipums_api.extract), so a stale-stamped entry re-parses its
+# codebook on every call - cheap next to one API round trip.
 #
-# NOTE: entries written before this constant existed carry no stamp and there is
-# no update-in-place in extractors.manifest, so they re-parse their codebook on
-# every call - by design, and cheap next to one API round trip.
+# Example 1:
+#  - Manifest entry was written stamped 1, flag is at 1.
+#  - Outcome:
+#       quality_flags/topcode_flags are read from the entry, no codebook read.
+#
+# Example 2:
+#  - Manifest entry was written stamped 1, code is now at 2.
+#  - Outcome:
+#       quality_flags/topcode_flags are ignored; the codebook is re-read to
+#       re-derive them.
 FLAG_PARSER_VERSION = 1
 
-# Regex expressions aimed to recognize flags in local codebooks
+# Recognize a flag label and capture its source variable(s)
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "quality": re.compile(
         r"^\s*data\s+quality\s+flags?\s+for\s+(?P<sources>.+)$", re.I
@@ -81,7 +86,7 @@ _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "topcode": re.compile(r"^\s*topcode\s+flags?\s+for\s+(?P<sources>.+)$", re.I),
 }
 
-# Regex expression that aims to recognize a flag kind
+# Strip a trailing qualifier, e.g. "SRCEARN [detailed version]" -> "SRCEARN"
 _QUALIFIER_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 
 # Regex expression that strips trailing sentence punctuation left over once
@@ -92,9 +97,8 @@ _TRAILING_PUNCT_RE = re.compile(r"[.,;:]+\s*$")
 # for the flag (QINCWAGE -> INCWAGE)
 _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
 
-
-# Regex expression that aims to determine if sepected candidate is
-# a valid variable from a local codebook
+# Regex expression that aims to determine if selected candidate is
+# a valid variable
 _VALID_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -259,6 +263,16 @@ def _cache_key(ddi_path: Path) -> tuple[str, int, int]:
     return (str(ddi_path.resolve()), stat.st_mtime_ns, stat.st_size)
 
 
+def _summarize_and_cache(key: tuple[str, int, int], ddi_path: Path) -> DDISummary:
+    """Parse and memoize under an already-computed key."""
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
+    _SUMMARY_CACHE[key] = summary
+    return summary
+
+
 def summarize_ddi(ddi_path: Path) -> DDISummary:
     """Summarize one DDI codebook.
 
@@ -269,13 +283,7 @@ def summarize_ddi(ddi_path: Path) -> DDISummary:
     Returns:
         DDISummary
     """
-    key = _cache_key(ddi_path)
-    cached = _SUMMARY_CACHE.get(key)
-    if cached is not None:
-        return cached
-    summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
-    _SUMMARY_CACHE[key] = summary
-    return summary
+    return _summarize_and_cache(_cache_key(ddi_path), ddi_path)
 
 
 def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
@@ -308,7 +316,7 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
     if key in _SUMMARY_CACHE:
         return _SUMMARY_CACHE[key]
     try:
-        summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
+        summary = _summarize_and_cache(key, ddi_path)
     except Exception as exc:
         log.warning(
             "ipums_ddi_unreadable",
@@ -316,14 +324,40 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
             error=str(exc),
             exc_info=True,
         )
-        _SUMMARY_CACHE[key] = None
+        # A parse failure is a property of the file and mtime/size are in the key;
+        # a resource failure is not, so it must not become a permanent "None".
+        if not isinstance(exc, (MemoryError, OSError)):
+            _SUMMARY_CACHE[key] = None
         return None
     _SUMMARY_CACHE[key] = summary
     return summary
 
 
+def _as_flag_map(value: object, kind: str) -> dict[str, tuple[str, ...]]:
+    """source-variable -> flag-names map recorded in a manifest entry.
+
+    Drops any pair whose value is not a list of names: tuple() on a scalar
+    would coerce "QINCWAGE" into ('Q', 'I', ...) rather than rejecting it.
+    """
+    if not isinstance(value, dict):
+        return {}
+    flag_map = {
+        source: tuple(names)
+        for source, raw in value.items()
+        if isinstance(source, str) and (names := as_name_list(raw)) is not None
+    }
+    if len(flag_map) != len(value):
+        log.warning(
+            "ipums_flag_map_entries_dropped",
+            kind=kind,
+            reason="value_not_a_list_of_names",
+            kept=sorted(flag_map),
+        )
+    return flag_map
+
+
 def summary_from_metadata(
-    metadata: Mapping[str, Any], require_current_parser: bool = True
+    metadata: Mapping[str, Any], require_current_flag_parser: bool = True
 ) -> DDISummary | None:
     """Rebuild a DDISummary from what a manifest entry recorded, without
     touching the codebook. None if the entry predates those keys, or if the
@@ -335,12 +369,10 @@ def summary_from_metadata(
     Args:
         metadata (Mapping[str, Any]):
             One manifest entry's `metadata` block. Not mutated.
-        require_current_parser (bool):
-            Reject a flag map not stamped with the current
-            FLAG_PARSER_VERSION. False accepts a stale map, for a caller that
-            has already established there is no codebook to re-derive from -
-            a possibly-outdated answer beats no answer for a heuristic whose
-            only job is "is this name a flag?".
+        require_current_flag_parser (bool):
+            If True - reject a map whose stamp is not exactly FLAG_PARSER_VERSION.
+            If False - accepts a map. For a caller that has no codebook left
+            to re-derive from.
 
     Returns:
         DDISummary, or None if the entry carries nothing usable.
@@ -351,7 +383,15 @@ def summary_from_metadata(
         `summary.ddi_path` from this function as a codebook without checking
         `.suffix == ".xml"`.
     """
-    delivered = metadata.get("delivered_variables")
+    raw_delivered = metadata.get("delivered_variables")
+    delivered = as_name_list(raw_delivered)
+
+    if delivered is None and raw_delivered is not None:
+        log.warning(
+            "ipums_delivered_variables_not_a_name_list",
+            ddi_path=str(metadata.get("ddi_path")),
+        )
+
     if not delivered:
         return None
 
@@ -359,23 +399,22 @@ def summary_from_metadata(
     # next to it on disk is the ground truth, so let the caller re-derive.
     # `!=` rather than `<` is deliberate - it also rejects a map written by a
     # newer checkout, and it is right when YAML hands the stamp back as "1".
-    if require_current_parser and (
+    if require_current_flag_parser and (
         metadata.get("flag_parser_version") != FLAG_PARSER_VERSION
     ):
         return None
-
-    quality = metadata.get("quality_flags")
-    topcode = metadata.get("topcode_flags")
-    quality_flags = quality if isinstance(quality, dict) else {}
-    topcode_flags = topcode if isinstance(topcode, dict) else {}
 
     return DDISummary(
         ddi_path=Path(str(metadata["ddi_path"]))
         if metadata.get("ddi_path")
         else Path(),
         variables=tuple(delivered),
-        quality_flags=MappingProxyType({k: tuple(v) for k, v in quality_flags.items()}),
-        topcode_flags=MappingProxyType({k: tuple(v) for k, v in topcode_flags.items()}),
+        quality_flags=MappingProxyType(
+            _as_flag_map(metadata.get("quality_flags"), "quality")
+        ),
+        topcode_flags=MappingProxyType(
+            _as_flag_map(metadata.get("topcode_flags"), "topcode")
+        ),
     )
 
 
@@ -477,13 +516,11 @@ class FlagRegistry:
         return bool(self.quality or self.topcode)
 
 
-def registry_from_summaries(summaries: Iterable[DDISummary | None]) -> FlagRegistry:
+def registry_from_summaries(summaries: Iterable[DDISummary]) -> FlagRegistry:
     """Takes several DDI summaries and unions flags into one registry."""
     quality: dict[str, list[str]] = {}
     topcode: dict[str, list[str]] = {}
     for summary in summaries:
-        if summary is None:
-            continue
         for mapping, out in (
             (summary.quality_flags, quality),
             (summary.topcode_flags, topcode),
@@ -506,49 +543,42 @@ def collection_flag_registry(
     """Tries to collect all flags known for `collection_dir`.
 
     Resolution order, cheapest first:
-      1. flag maps recorded in the manifest at download time - no file I/O;
-      2. the codebook itself, for entries written before those keys existed;
-      3. every *.xml in the directory, if there is no manifest at all.
+      1. Flag maps recorded in the manifest at download time - no file I/O;
+      2. The codebook itself, for entries written before those keys existed;
+         or whose recorded map failed the parser-version check;
+      3. A stale-parser version map recorded in the manifest, if the codebook
+         is missing or unreadable;
+      4. Every *.xml in the directory, if there is no manifest at all.
 
     `manifest_entries` lets a caller that has already read _MANIFEST.yaml pass
     it in rather than re-reading it.
     """
 
-    entries = (
-        list(manifest_entries)
-        if manifest_entries is not None
-        else read_manifest(collection_dir)
+    summaries: list[DDISummary] = []
+
+    valid_entries = iter_valid_entries(
+        source_dir=collection_dir,
+        entries=manifest_entries,
     )
 
-    summaries: list[DDISummary | None] = []
-    for entry in entries:
-        # A hand-edited/truncated manifest can carry `metadata:` empty or as a
-        # scalar. This runs on every extract(), so one bad entry must not block
-        # the whole collection.
-        metadata = entry.get("metadata") if isinstance(entry, dict) else None
-        if not isinstance(metadata, dict):
-            # Warn for both shapes: a scalar `metadata:` and a stray non-mapping
-            # entry in the YAML list. Silence here is what makes a corrupted
-            # manifest look like an empty one.
-            log.warning(
-                "ipums_manifest_entry_malformed",
-                collection_dir=str(collection_dir),
-                entry=str(entry)[:200],
-            )
-            continue
+    for entry, metadata in valid_entries:
+        # Try to read summaries from metadata
         recorded = summary_from_metadata(metadata)
         if recorded is not None:
             summaries.append(recorded)
             continue
-        # try to read from raw XML-codebooks
+
+        # Try to read from raw XML-codebooks
         ddi_path = metadata.get("ddi_path")
         if ddi_path and Path(ddi_path).exists():
-            summaries.append(try_summarize_ddi(Path(ddi_path)))
-            continue
-        # Codebook gone and the recorded map stamped out by an older parser:
-        # a stale flag map still beats "this name is not a flag", which costs a
-        # rejected API round trip. Use it - but never silently.
-        stale = summary_from_metadata(metadata, require_current_parser=False)
+            summary = try_summarize_ddi(Path(ddi_path))
+            if summary is not None:
+                summaries.append(summary)
+                continue
+
+        # Codebook gone or unreadable: a stale recorded map still beats
+        # "not a flag", which costs a rejected API round trip.
+        stale = summary_from_metadata(metadata, require_current_flag_parser=False)
         if stale is not None:
             log.info(
                 "ipums_flag_map_stale_but_used",
@@ -560,12 +590,11 @@ def collection_flag_registry(
 
     # If nothing usable came out of the manifest (no entries, or every recorded
     # codebook is unreadable), sweep the directory itself.
-    if (
-        not any(summary is not None for summary in summaries)
-        and collection_dir.exists()
-    ):
+    if not summaries:
         summaries = [
-            try_summarize_ddi(path) for path in sorted(collection_dir.glob("*.xml"))
+            s
+            for p in sorted(collection_dir.glob("*.xml"))
+            if (s := try_summarize_ddi(p)) is not None
         ]
 
     return registry_from_summaries(summaries)
