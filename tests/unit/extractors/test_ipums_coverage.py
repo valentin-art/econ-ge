@@ -11,6 +11,7 @@ from src.extractors.ipums_coverage import (
     build_coverage,
     parse_sample_year,
     plan_delta_requests,
+    plan_force_requests,
     save_coverage,
 )
 from src.extractors.manifest import append_to_manifest
@@ -309,6 +310,61 @@ def test_plan_delta_requests_diffs_requested_not_delivered() -> None:
     assert len(planned) == 1
     assert planned[0].request_kind == "variable_delta"
     assert planned[0].variables == ("AGE",)
+
+
+def test_plan_force_requests_splits_known_from_new_samples() -> None:
+    coverage = _coverage_with_one_sample({"AGE", "SEX"})
+
+    planned = plan_force_requests(
+        coverage, ["cps2006_09s", "cps2007_09s"], ["AGE", "SEX"]
+    )
+
+    # Both halves carry the full variable list - force re-pulls everything -
+    # but the split still tells the parse stage which half merges onto columns
+    # already in bronze rather than overwriting them.
+    assert [(p.samples, p.request_kind) for p in planned] == [
+        (("cps2007_09s",), "new_samples"),
+        (("cps2006_09s",), "variable_delta"),
+    ]
+    assert all(p.variables == ("AGE", "SEX") for p in planned)
+
+
+def test_plan_force_requests_omits_an_empty_half() -> None:
+    coverage = _coverage_with_one_sample({"AGE"})
+
+    planned = plan_force_requests(coverage, ["cps2006_09s"], ["AGE", "SEX"])
+
+    assert [p.request_kind for p in planned] == ["variable_delta"]
+    # Unlike plan_delta_requests, force does not diff - SEX being missing from
+    # coverage changes nothing about what is pulled.
+    assert planned[0].variables == ("AGE", "SEX")
+
+
+def test_build_coverage_skips_an_entry_whose_samples_are_not_a_list(
+    tmp_path: Path,
+) -> None:
+    """`samples: cps2007_09s` - a bare string where a list belongs - would be
+    iterated one character at a time into a "sample" per letter.
+    """
+    collection_dir = tmp_path / "cps"
+    collection_dir.mkdir()
+    _add_manifest_entry(collection_dir, "cps_00001", ["cps2006_09s"], ["AGE"])
+    _add_manifest_entry(collection_dir, "cps_00002", ["cps2007_09s"], ["AGE"])
+    manifest = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest.read_text())
+    entries[1]["metadata"]["samples"] = "cps2007_09s"
+    manifest.write_text(yaml.safe_dump(entries, sort_keys=False))
+
+    with structlog.testing.capture_logs() as logs:
+        coverage = build_coverage(collection_dir, "cps")
+
+    assert set(coverage.samples) == {"cps2006_09s"}
+    skipped = [
+        entry for entry in logs if entry["event"] == "ipums_manifest_entry_skipped"
+    ]
+    assert [entry["reason"] for entry in skipped] == [
+        "samples_or_variables_not_a_list_of_names"
+    ]
 
 
 def _append_raw_entry(collection_dir: Path, entry: dict) -> None:
