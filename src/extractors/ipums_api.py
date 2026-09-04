@@ -219,7 +219,6 @@ def find_matching_extract(
     requested_samples = set(samples)
     requested_variables = set(variables)
     default_structure = _default_data_structure()
-    match = None
 
     valid_entries = iter_valid_entries(
         collection_dir,
@@ -228,7 +227,7 @@ def find_matching_extract(
         entries=manifest_entries,
     )
 
-    for entry, metadata in valid_entries:
+    for entry, metadata in reversed(list(valid_entries)):
         if set(metadata["samples"]) != requested_samples:
             continue
         if not requested_variables <= set(metadata["variables"]):
@@ -262,7 +261,7 @@ def find_matching_extract(
             continue
         size_bytes, sha256 = checksum
 
-        match = CachedExtract(
+        return CachedExtract(
             data_path=data_path,
             ddi_path=ddi_path,
             extract_id=extract_id,
@@ -270,7 +269,7 @@ def find_matching_extract(
             sha256=sha256,
         )
 
-    return match
+    return None
 
 
 class IPUMSExtractor(Extractor):
