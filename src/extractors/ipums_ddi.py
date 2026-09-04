@@ -62,6 +62,10 @@ FlagKind = Literal["quality", "topcode"]
 # regexes - not on a change to how variable names are extracted from the codebook
 # (a separate, simpler loop that this version does not gate).
 #
+# NOTE: nothing rewrites an existing entry's stamp. extract() appends only on a
+# real download (see ipums_api.extract), so a stale-stamped entry re-parses its
+# codebook on every call - cheap next to one API round trip.
+#
 # Example 1:
 #  - Manifest entry was written stamped 1, flag is at 1.
 #  - Outcome:
@@ -260,9 +264,7 @@ def _cache_key(ddi_path: Path) -> tuple[str, int, int]:
 
 
 def _summarize_and_cache(key: tuple[str, int, int], ddi_path: Path) -> DDISummary:
-    """Parse and memoize under an already-computed key - the only writer of
-    _SUMMARY_CACHE.
-    """
+    """Parse and memoize under an already-computed key."""
     cached = _SUMMARY_CACHE.get(key)
     if cached is not None:
         return cached
@@ -322,10 +324,8 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
             error=str(exc),
             exc_info=True,
         )
-        # A parse failure is a property of the file and stays true until the file
-        # changes (i.e., mtime/size are in the key). A resource failure is not.
-        # Save info about file reading failure (None value) only
-        # if it is not an environment failure.
+        # A parse failure is a property of the file and mtime/size are in the key;
+        # a resource failure is not, so it must not become a permanent "None".
         if not isinstance(exc, (MemoryError, OSError)):
             _SUMMARY_CACHE[key] = None
         return None
@@ -383,7 +383,15 @@ def summary_from_metadata(
         `summary.ddi_path` from this function as a codebook without checking
         `.suffix == ".xml"`.
     """
-    delivered = as_name_list(metadata.get("delivered_variables"))
+    raw_delivered = metadata.get("delivered_variables")
+    delivered = as_name_list(raw_delivered)
+
+    if delivered is None and raw_delivered is not None:
+        log.warning(
+            "ipums_delivered_variables_not_a_name_list",
+            ddi_path=str(metadata.get("ddi_path")),
+        )
+
     if not delivered:
         return None
 
