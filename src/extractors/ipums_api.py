@@ -33,6 +33,7 @@ from src.extractors.ipums_ddi import (
 )
 from src.extractors.manifest import (
     append_to_manifest,
+    as_name_list,
     iter_valid_entries,
     read_manifest,
 )
@@ -229,10 +230,22 @@ def find_matching_extract(
     )
 
     for entry, metadata in reversed(list(valid_entries)):
-        if set(metadata["samples"]) != requested_samples:
+        entry_samples = as_name_list(metadata["samples"])
+        entry_variables = as_name_list(metadata["variables"])
+
+        if entry_samples is None or entry_variables is None:
+            log.warning(
+                "ipums_manifest_entry_skipped",
+                reason="samples_or_variables_not_a_list_of_names",
+                entry=str(entry)[:200],
+            )
             continue
-        if not requested_variables <= set(metadata["variables"]):
+
+        if set(entry_samples) != requested_samples:
             continue
+        if not requested_variables <= set(entry_variables):
+            continue
+
         # Entries predating these keys were all pulled with today's defaults
         # (rectangular-on-P, flags on) - verified against the cps manifest.
         if metadata.get("data_structure", default_structure) != data_structure:
