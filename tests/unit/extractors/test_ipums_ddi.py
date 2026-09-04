@@ -220,6 +220,54 @@ def test_try_summarize_ddi_returns_none_for_missing_file(tmp_path: Path) -> None
     assert try_summarize_ddi(tmp_path / "nope.xml") is None
 
 
+def test_try_summarize_ddi_does_not_cache_an_environment_failure(
+    tmp_path: Path, make_ddi_xml, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError says nothing about the file - a dropped mount, too many open
+    handles - so the next call must parse instead of being served the None.
+    """
+    ddi_path = _write_ddi(tmp_path, make_ddi_xml, [("AGE", "Age", 2)])
+    real_read = readers.read_ipums_ddi
+    calls = {"n": 0}
+
+    def failing_once(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("EMFILE")
+        return real_read(path)
+
+    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+
+    assert try_summarize_ddi(ddi_path) is None
+
+    summary = try_summarize_ddi(ddi_path)
+    assert summary is not None
+    assert summary.variables == ("AGE",)
+
+
+def test_try_summarize_ddi_caches_a_parse_failure(
+    tmp_path: Path, make_ddi_xml, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contrast to the OSError case: a file that does not parse stays
+    unparseable until it changes, and mtime/size are already in the cache key.
+    """
+    ddi_path = _write_ddi(tmp_path, make_ddi_xml, [("AGE", "Age", 2)])
+    real_read = readers.read_ipums_ddi
+    calls = {"n": 0}
+
+    def failing_once(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("not a codebook")
+        return real_read(path)
+
+    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+
+    assert try_summarize_ddi(ddi_path) is None
+    assert try_summarize_ddi(ddi_path) is None
+    assert calls["n"] == 1
+
+
 def test_summarize_ddi_raises_for_stub_codebook(tmp_path: Path) -> None:
     stub = tmp_path / "stub.xml"
     stub.write_text("<codeBook/>")
