@@ -957,6 +957,22 @@ def test_find_matching_extract_reuses_entry_without_flag_or_structure_keys(
             "missing_entry_keys",
             id="no_file_path",
         ),
+        pytest.param(
+            # build_coverage requires extraction_id too. If the cache accepted
+            # an entry the planner cannot see, extract_incremental would keep
+            # re-planning a sample it already has and never converge.
+            {
+                "file_path": "/nonexistent/cps_00030.dat.gz",
+                "metadata": {
+                    "samples": ["cps2006_09s"],
+                    "variables": ["AGE"],
+                    "ddi_path": "/nonexistent/cps_00030.xml",
+                    "extract_id": 30,
+                },
+            },
+            "missing_entry_keys",
+            id="no_extraction_id",
+        ),
     ],
 )
 def test_find_matching_extract_skips_a_malformed_entry(
