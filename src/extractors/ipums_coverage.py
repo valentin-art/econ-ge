@@ -7,7 +7,7 @@ IPUMS submission counts against the account's extract quota.
 """
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -65,8 +65,9 @@ class CollectionCoverage:
     collection: str
     samples: Mapping[str, SampleCoverage]
 
-    # Same reasoning as DDISummary/FlagRegistry: `samples` is unhashable, so
-    # the frozen=True default __hash__ would only ever fail by accident.
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+
     __hash__ = None  # type: ignore[assignment]
 
     @property
@@ -125,7 +126,9 @@ class _SampleAccumulator:
     delivered: set[str] = field(default_factory=set)
     extraction_ids: list[str] = field(default_factory=list)
 
-    def add(self, requested, delivered, extraction_id: str) -> None:
+    def add(
+        self, requested: Iterable[str], delivered: Iterable[str], extraction_id: str
+    ) -> None:
         self.requested.update(requested)
         self.delivered.update(delivered)
 
@@ -147,10 +150,6 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     """
     by_sample: dict[str, _SampleAccumulator] = {}
 
-    # file_path and extraction_id are read below without a further guard, and
-    # neither can be defaulted: Path("") is Path(".") - which exists - so a
-    # missing file_path would sail past the existence check and be counted as
-    # covered, hiding a sample that was never actually downloaded.
     valid_entries = iter_valid_entries(
         source_dir=collection_dir,
         required_entry_keys=_REQUIRED_ENTRY,
@@ -158,6 +157,8 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
     )
 
     for entry, metadata in valid_entries:
+        # A missing file_path would silently pass the exists() check below and
+        # count as a downloaded sample. Path("")=Path(".").
         data_path = Path(entry["file_path"])
         ddi_path = Path(metadata["ddi_path"])
 
@@ -183,7 +184,7 @@ def build_coverage(collection_dir: Path, collection: str) -> CollectionCoverage:
             )
 
     samples = {sample: acc.freeze() for sample, acc in by_sample.items()}
-    return CollectionCoverage(collection=collection, samples=MappingProxyType(samples))
+    return CollectionCoverage(collection=collection, samples=samples)
 
 
 def save_coverage(coverage: CollectionCoverage, collection_dir: Path) -> Path:

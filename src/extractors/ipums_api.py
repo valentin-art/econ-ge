@@ -138,7 +138,7 @@ def _validate_requested_variables(
     if not registry:
         return
 
-    problems = []
+    problems: list[str] = []
     flagged: list[str] = []
     for variable in variables:
         kind = registry.kind_of(variable)
@@ -249,7 +249,7 @@ def find_matching_extract(
 
         try:
             extract_id = int(metadata["extract_id"])
-        except (KeyError, TypeError, ValueError):
+        except (TypeError, ValueError):
             log.warning(
                 "ipums_manifest_entry_skipped",
                 reason="unusable_extract_id",
@@ -430,9 +430,9 @@ class IPUMSExtractor(Extractor):
         collection_dir = self.storage_dir / collection
         collection_dir.mkdir(parents=True, exist_ok=True)
 
-        # Normalization of variables for convenence and to avoid typos in config files.
+        # Normalization of variables names. Affects variables lookup in the manifest
+        # and the flag registry, and the request to the API.
         variables = tuple(v.upper() for v in variables)
-        # samples = tuple(v.lower() for v in samples)
 
         # One read, two consumers: the flag registry and the cache lookup.
         # build_coverage (extract_incremental only) still reads for itself.
@@ -467,7 +467,7 @@ class IPUMSExtractor(Extractor):
                 "ipums_extract_cached",
                 collection=collection,
                 extract_id=extract_id,
-                file_path=data_path,
+                file_path=str(data_path),
             )
         else:
             data_path, ddi_path, extract_id = self._submit_and_download(
@@ -579,7 +579,6 @@ class IPUMSExtractor(Extractor):
         existing bronze columns instead of overwriting the whole file), and
         genuinely new samples as a "new_samples" force-pull - one or two
         extracts, mirroring extract(force=True) per group.
-        With force=True, two extracts may be submitted.
 
         Args:
             collection (str):
@@ -610,7 +609,6 @@ class IPUMSExtractor(Extractor):
                 and no new extracts were needed.
         """
         variables = tuple(v.upper() for v in variables)
-        # samples = tuple(v.lower() for v in samples)
 
         collection_dir = self.storage_dir / collection
         coverage = build_coverage(collection_dir, collection)

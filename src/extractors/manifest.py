@@ -1,4 +1,4 @@
-"""Read and append manifests of ExtractRecord."""
+"""Read and append manifests of ExtractionRecord."""
 
 from collections.abc import Collection, Iterator
 from pathlib import Path
@@ -38,6 +38,9 @@ def iter_valid_entries(
     """Yield (entry, metadata) for each well-formed manifest entry, warning once
     per skipped entry. `entries` reuses an already-read manifest.
     """
+    needed_metadata = frozenset(required_metadata_keys)
+    needed_entry = frozenset(required_entry_keys)
+
     rows = list(entries) if entries is not None else read_manifest(source_dir)
     for entry in rows:
         metadata = entry.get("metadata") if isinstance(entry, dict) else None
@@ -48,14 +51,14 @@ def iter_valid_entries(
                 source_dir=str(source_dir),
                 entry=str(entry)[:200],
             )
-        elif not set(required_metadata_keys) <= metadata.keys():
+        elif not needed_metadata <= metadata.keys():
             log.warning(
                 "manifest_entry_skipped",
                 reason="missing_metadata_keys",
                 source_dir=str(source_dir),
                 entry=str(entry)[:200],
             )
-        elif not set(required_entry_keys) <= entry.keys():
+        elif not needed_entry <= entry.keys():
             log.warning(
                 "manifest_entry_skipped",
                 reason="missing_entry_keys",

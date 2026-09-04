@@ -58,10 +58,23 @@ log = structlog.get_logger(__name__)
 
 FlagKind = Literal["quality", "topcode"]
 
-# A version of regex expressions. Increment after each change.
+# A flag that tracks parsers version. Increment on a change to parse_flag_label's
+# regexes - not on a change to how variable names are extracted from the codebook
+# (a separate, simpler loop that this version does not gate).
+#
+# Example 1:
+#  - Manifest entry was written stamped 1, flag is at 1.
+#  - Outcome:
+#       quality_flags/topcode_flags are read from the entry, no codebook read.
+#
+# Example 2:
+#  - Manifest entry was written stamped 1, code is now at 2.
+#  - Outcome:
+#       quality_flags/topcode_flags are ignored; the codebook is re-read to
+#       re-derive them.
 FLAG_PARSER_VERSION = 1
 
-# Regex expressions aimed to strip a trailing [...]
+# Recognize a flag label and capture its source variable(s)
 _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "quality": re.compile(
         r"^\s*data\s+quality\s+flags?\s+for\s+(?P<sources>.+)$", re.I
@@ -69,7 +82,7 @@ _FLAG_LABEL_RES: dict[FlagKind, re.Pattern[str]] = {
     "topcode": re.compile(r"^\s*topcode\s+flags?\s+for\s+(?P<sources>.+)$", re.I),
 }
 
-# Regex expression that aims to recognize a flag kind
+# Strip a trailing qualifier, e.g. "SRCEARN [detailed version]" -> "SRCEARN"
 _QUALIFIER_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 
 # Regex expression that strips trailing sentence punctuation left over once
@@ -79,7 +92,6 @@ _TRAILING_PUNCT_RE = re.compile(r"[.,;:]+\s*$")
 # Regex expression that aims to find candidates of a source variable
 # for the flag (QINCWAGE -> INCWAGE)
 _SOURCE_SPLIT_RE = re.compile(r"\s*,\s*and\s+|\s+and\s+|\s*,\s*", re.I)
-
 
 # Regex expression that aims to determine if selected candidate is
 # a valid variable
@@ -247,6 +259,25 @@ def _cache_key(ddi_path: Path) -> tuple[str, int, int]:
     return (str(ddi_path.resolve()), stat.st_mtime_ns, stat.st_size)
 
 
+def _summarize_and_cache(key: tuple[str, int, int], ddi_path: Path) -> DDISummary:
+    """Helper that summarizes a codebook and caches the result.
+
+    Args:
+        key (tuple[str, int, int]):
+            A cache key for the codebook.
+            ddi_path (Path):
+
+    Returns:
+        DDISummary
+    """
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
+    _SUMMARY_CACHE[key] = summary
+    return summary
+
+
 def summarize_ddi(ddi_path: Path) -> DDISummary:
     """Summarize one DDI codebook.
 
@@ -257,13 +288,7 @@ def summarize_ddi(ddi_path: Path) -> DDISummary:
     Returns:
         DDISummary
     """
-    key = _cache_key(ddi_path)
-    cached = _SUMMARY_CACHE.get(key)
-    if cached is not None:
-        return cached
-    summary = _summarize_codebook(ddi_path, readers.read_ipums_ddi(ddi_path))
-    _SUMMARY_CACHE[key] = summary
-    return summary
+    return _summarize_and_cache(_cache_key(ddi_path), ddi_path)
 
 
 def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
@@ -296,7 +321,7 @@ def try_summarize_ddi(ddi_path: Path) -> DDISummary | None:
     if key in _SUMMARY_CACHE:
         return _SUMMARY_CACHE[key]
     try:
-        summary = summarize_ddi(ddi_path)
+        summary = _summarize_and_cache(key, ddi_path)
     except Exception as exc:
         log.warning(
             "ipums_ddi_unreadable",
@@ -532,8 +557,6 @@ def collection_flag_registry(
 
     valid_entries = iter_valid_entries(
         source_dir=collection_dir,
-        required_entry_keys=(),
-        required_metadata_keys=(),
         entries=manifest_entries,
     )
 
