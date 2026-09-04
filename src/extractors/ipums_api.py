@@ -78,10 +78,13 @@ def _recorded_checksum(
 
     # A recorded size that disagrees with the file rejects the entry whether or
     # not a checksum came with it - the file is what a re-download would replace.
-    if size is not None and size != data_path.stat().st_size:
-        log.warning(
-            "ipums_manifest_entry_skipped",
-            reason="recorded_size_mismatch",
+    on_disk = data_path.stat().st_size
+    if size is not None and size != on_disk:
+        log.error(
+            "ipums_data_file_size_mismatch",
+            file_path=str(data_path),
+            recorded_size=size,
+            size_on_disk=on_disk,
             entry=str(entry)[:200],
         )
         return None
