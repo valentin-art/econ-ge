@@ -177,6 +177,9 @@ def _corrupt_manifest_checksum(collection_dir: Path, **fields: object) -> None:
         pytest.param({"size_bytes": "not-a-number"}, id="unparseable_size"),
         pytest.param({"sha256": None}, id="null_checksum"),
         pytest.param({"size_bytes": None, "sha256": None}, id="both_null"),
+        # A checksum with no size is unusable on its own: nothing has been
+        # checked against the file, so the recorded hash is not evidence.
+        pytest.param({"size_bytes": None}, id="null_size_valid_checksum"),
     ],
 )
 def test_extract_recomputes_checksum_rather_than_resubmitting(
@@ -1000,6 +1003,102 @@ def test_find_matching_extract_skips_a_malformed_entry(
     assert record.metadata["cached"] is True
     skipped = [entry for entry in logs if entry["event"] == "manifest_entry_skipped"]
     assert reason in [entry["reason"] for entry in skipped]
+
+
+def test_find_matching_extract_returns_the_newest_of_two_matching_entries(
+    tmp_path: Path,
+) -> None:
+    """Two entries match equally well; the later one wins. `reversed` is what
+    makes that true, and nothing else in the suite fails if it is dropped.
+    """
+    client = _SequentialFakeClient(start_id=1)
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=client
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"], force=True
+    )
+    assert len(read_manifest(tmp_path / "cps")) == 2
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    assert record.metadata["cached"] is True
+    assert record.metadata["extract_id"] == 2
+
+
+def test_find_matching_extract_skips_an_entry_whose_samples_are_not_a_list(
+    tmp_path: Path, make_ddi_xml
+) -> None:
+    """A bare string passes iter_valid_entries - the key is present - so the
+    shape check inside the match loop is the only thing rejecting it. Without
+    it, set("cps2006_09s") compares characters and never matches.
+    """
+    collection_dir = _seed_cached_entry(tmp_path, make_ddi_xml)
+    manifest = collection_dir / "_MANIFEST.yaml"
+    entries = yaml.safe_load(manifest.read_text())
+    entries.append(
+        {
+            "extraction_id": "cps_00030",
+            "file_path": "/nonexistent/cps_00030.dat.gz",
+            "metadata": {
+                "samples": "cps2006_09s",
+                "variables": ["AGE"],
+                "ddi_path": "/nonexistent/cps_00030.xml",
+                "extract_id": 30,
+            },
+        }
+    )
+    manifest.write_text(yaml.safe_dump(entries, sort_keys=False))
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY, storage_dir=tmp_path, client=_ClientMustNotBeCalled()
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        record = extractor.extract(
+            collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+        )
+
+    assert record.metadata["cached"] is True
+    # Still the old event name: iter_valid_entries emits "manifest_entry_skipped",
+    # the shape checks left in this loop emit "ipums_manifest_entry_skipped".
+    # Update this together with that rename.
+    assert "samples_or_variables_not_a_list_of_names" in [
+        entry.get("reason")
+        for entry in logs
+        if entry["event"] == "ipums_manifest_entry_skipped"
+    ]
+
+
+def test_extract_carries_over_the_recorded_checksum_without_rehashing(
+    tmp_path: Path,
+) -> None:
+    """The size-matched branch trusts what the entry recorded. Pinned with a
+    checksum that is wrong on purpose: a re-hash would overwrite it, so the
+    bogus value surviving is the proof no re-hash happened.
+    """
+    bogus_sha = "0" * 64  # pragma: allowlist secret
+    extractor = IPUMSExtractor(
+        api_key=_FAKE_API_KEY,
+        storage_dir=tmp_path,
+        client=_SequentialFakeClient(start_id=1),
+    )
+    _seed_manifest_entry(extractor, "cps", ["cps2006_09s"], ["AGE"])
+    # Size left alone - only a matching size reaches this branch at all.
+    _corrupt_manifest_checksum(tmp_path / "cps", sha256=bogus_sha)
+    extractor.client = _ClientMustNotBeCalled()
+
+    record = extractor.extract(
+        collection="cps", samples=["cps2006_09s"], variables=["AGE"]
+    )
+
+    data_path = tmp_path / "cps" / "cps_00001.dat.gz"
+    assert record.metadata["cached"] is True
+    assert record.sha256 == bogus_sha
+    assert record.sha256 != hashlib.sha256(data_path.read_bytes()).hexdigest()
 
 
 def test_find_matching_extract_misses_when_flags_explicitly_differ(

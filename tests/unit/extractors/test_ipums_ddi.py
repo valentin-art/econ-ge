@@ -387,6 +387,27 @@ def test_summary_from_metadata_rejects_a_flag_map_value_that_is_not_a_name_list(
     assert summary.kind_of("Q") is None
 
 
+def test_summary_from_metadata_logs_which_flag_pairs_it_dropped() -> None:
+    # The dropped pair is invisible in the result - the summary looks merely
+    # smaller - so the log is the only signal that a flag column went missing.
+    with structlog.testing.capture_logs() as logs:
+        summary_from_metadata(
+            {
+                "delivered_variables": ["INCWAGE", "QINCWAGE", "INCFARM"],
+                "flag_parser_version": FLAG_PARSER_VERSION,
+                "ddi_path": "/tmp/x.xml",
+                "quality_flags": {"INCWAGE": ["QINCWAGE"], "INCFARM": "QINCFARM"},
+            }
+        )
+
+    dropped = [
+        entry for entry in logs if entry["event"] == "ipums_flag_map_entries_dropped"
+    ]
+    assert len(dropped) == 1
+    assert dropped[0]["kind"] == "quality"
+    assert dropped[0]["kept"] == ["INCWAGE"]
+
+
 def test_summary_from_metadata_keeps_the_well_formed_pairs_of_a_partial_map() -> None:
     summary = summary_from_metadata(
         {

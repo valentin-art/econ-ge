@@ -340,6 +340,15 @@ def test_plan_force_requests_omits_an_empty_half() -> None:
     assert planned[0].variables == ("AGE", "SEX")
 
 
+def test_plan_force_requests_plans_nothing_when_no_samples_are_asked_for() -> None:
+    # Both halves come out empty, so force plans nothing and extract_incremental
+    # reports it as "already covered" - misleading under force=True, but the
+    # behaviour is pinned here rather than the wording.
+    coverage = _coverage_with_one_sample({"AGE"})
+
+    assert plan_force_requests(coverage, [], ["AGE", "SEX"]) == []
+
+
 def test_build_coverage_skips_an_entry_whose_samples_are_not_a_list(
     tmp_path: Path,
 ) -> None:
