@@ -6,10 +6,10 @@ from pathlib import Path
 import pandas as pd
 import structlog
 
+from extractors.cps.cps import CPSBasicExtractor, CPSExtractor, CPSMWExtractor
 from src.config import sources
 from src.config.settings import settings
 from src.config.sources import CPSSource
-from src.extractors.cps import CPSBasicExtractor, CPSExtractor, CPSMWExtractor
 from src.input_output.parquet import read_parquet
 from src.parsers.cps.parser_cps import (
     build_and_save_variable_dictionary,
