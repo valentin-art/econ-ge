@@ -2,13 +2,9 @@ econ_ge:
   target: dev
   outputs:
     dev:
-      type: postgres
-      host: localhost
-      port: "{{ env_var('POSTGRES_HOST_PORT') | int }}"
-      user: "{{ env_var('POSTGRES_USER') }}"
-      password: "{{ env_var('POSTGRES_PASSWORD') }}"
-      dbname: "{{ env_var('POSTGRES_DB') }}"
-      schema: public
+      type: duckdb
+      # Same file as src.config.settings paths.duckdb_path — exported by the
+      # root .envrc so Python and dbt cannot drift to different warehouses.
+      path: "{{ env_var('DUCKDB_PATH') }}"
+      schema: main
       threads: 4
-      keepalives_idle: 0
-      connect_timeout: 10

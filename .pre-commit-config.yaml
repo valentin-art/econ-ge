@@ -30,10 +30,10 @@ repos:
     hooks:
       - id: sqlfluff-lint
         files: ^dbt/models/
-        args: [--dialect, postgres]
+        args: [--dialect, duckdb]
       - id: sqlfluff-fix
         files: ^dbt/models/
-        args: [--dialect, postgres]
+        args: [--dialect, duckdb]
 
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
