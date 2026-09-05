@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 
 import pytest
 
-from src.extractors.ipums_ddi import clear_ddi_summary_cache
+from extractors.ipums.ipums_ddi import clear_ddi_summary_cache
 
 _DDI_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <codeBook ID="ddi2-test" version="2.5" xmlns="ddi:codebook:2_5">

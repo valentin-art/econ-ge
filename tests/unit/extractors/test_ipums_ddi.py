@@ -13,8 +13,7 @@ import pytest
 import structlog.testing
 from ipumspy import readers
 
-from src.extractors.base import build_extraction_record
-from src.extractors.ipums_ddi import (
+from extractors.ipums.ipums_ddi import (
     FLAG_PARSER_VERSION,
     collection_flag_registry,
     flag_columns_for,
@@ -24,6 +23,7 @@ from src.extractors.ipums_ddi import (
     summary_from_metadata,
     try_summarize_ddi,
 )
+from src.extractors.base import build_extraction_record
 from src.extractors.manifest import append_to_manifest, read_manifest
 
 
@@ -187,7 +187,7 @@ def test_summarize_ddi_caches_on_path_mtime_and_size(
         return real_read(path)
 
     monkeypatch.setattr(
-        "src.extractors.ipums_ddi.readers.read_ipums_ddi", counting_read
+        "src.extractors.ipums.ipums_ddi.readers.read_ipums_ddi", counting_read
     )
 
     variables = [("AGE", "Age", 2), ("QAGE", "Data quality flag for AGE", 1)]
@@ -236,7 +236,9 @@ def test_try_summarize_ddi_does_not_cache_an_environment_failure(
             raise OSError("EMFILE")
         return real_read(path)
 
-    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+    monkeypatch.setattr(
+        "src.extractors.ipums.ipums_ddi.readers.read_ipums_ddi", failing_once
+    )
 
     assert try_summarize_ddi(ddi_path) is None
 
@@ -261,7 +263,9 @@ def test_try_summarize_ddi_caches_a_parse_failure(
             raise ValueError("not a codebook")
         return real_read(path)
 
-    monkeypatch.setattr("src.extractors.ipums_ddi.readers.read_ipums_ddi", failing_once)
+    monkeypatch.setattr(
+        "src.extractors.ipums.ipums_ddi.readers.read_ipums_ddi", failing_once
+    )
 
     assert try_summarize_ddi(ddi_path) is None
     assert try_summarize_ddi(ddi_path) is None
@@ -502,7 +506,7 @@ def test_collection_flag_registry_reads_manifest_without_parsing_ddis(
         raise AssertionError("registry should not parse a DDI it already has recorded")
 
     monkeypatch.setattr(
-        "src.extractors.ipums_ddi.readers.read_ipums_ddi", must_not_parse
+        "src.extractors.ipums.ipums_ddi.readers.read_ipums_ddi", must_not_parse
     )
 
     registry = collection_flag_registry(collection_dir)

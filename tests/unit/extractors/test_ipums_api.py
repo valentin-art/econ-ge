@@ -9,6 +9,7 @@ configured) to confirm live connectivity beyond what the tests below cover.
 """
 
 import hashlib
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -16,12 +17,12 @@ import structlog.testing
 import yaml
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
-from src.extractors.ipums_api import (
+from extractors.ipums.ipums_api import (
     IPUMSExtractor,
     _default_data_structure,
     find_matching_extract,
 )
-from src.extractors.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
+from extractors.ipums.ipums_ddi import FLAG_PARSER_VERSION, summary_from_metadata
 from src.extractors.manifest import read_manifest
 
 _FAKE_API_KEY = "fake-key"  # pragma: allowlist secret
@@ -62,7 +63,7 @@ class _SequentialFakeClient:
         start_id: int = 100,
         flags: dict[str, list[str]] | None = None,
         technical: tuple[str, ...] = ("YEAR", "SERIAL", "PERNUM"),
-        make_ddi_xml=None,
+        make_ddi_xml: Callable[[Sequence[tuple[str, str, int]]], str] | None = None,
     ) -> None:
         self._next_id = start_id
         self.submit_calls = 0
@@ -81,6 +82,7 @@ class _SequentialFakeClient:
         pass
 
     def _ddi_xml(self, extract) -> str:
+        assert self._make_ddi_xml is not None
         requested = [v.name for v in extract.variables]
         variables = [(name, name.title(), 2) for name in self.technical]
         for name in requested:

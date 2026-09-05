@@ -16,7 +16,7 @@ from typing import Any, Literal
 import structlog
 import yaml
 
-from src.extractors.ipums_ddi import try_summarize_ddi
+from extractors.ipums.ipums_ddi import try_summarize_ddi
 from src.extractors.manifest import as_name_list, iter_valid_entries
 
 log = structlog.get_logger(__name__)

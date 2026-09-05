@@ -7,29 +7,29 @@ the data file and its DDI codebook as-is.
 from collections.abc import Collection, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 import structlog
 from ipumspy import IpumsApiClient, MicrodataExtract
 from ipumspy.api.exceptions import BadIpumsApiRequest
 
-from src.config.settings import settings
-from src.extractors.base import (
-    ExtractionRecord,
-    Extractor,
-    build_extraction_record,
-)
-from src.extractors.ipums_coverage import (
+from extractors.ipums.ipums_coverage import (
     RequestKind,
     build_coverage,
     plan_delta_requests,
     plan_force_requests,
     save_coverage,
 )
-from src.extractors.ipums_ddi import (
+from extractors.ipums.ipums_ddi import (
     FLAG_PARSER_VERSION,
     collection_flag_registry,
     try_summarize_ddi,
+)
+from src.config.settings import settings
+from src.extractors.base import (
+    ExtractionRecord,
+    Extractor,
+    build_extraction_record,
 )
 from src.extractors.manifest import (
     append_to_manifest,
@@ -289,6 +289,22 @@ def find_matching_extract(
     return None
 
 
+class IpumsClient(Protocol):
+    """The subset of `IpumsApiClient` that `IPUMSExtractor` relies on.
+
+    Structural, so test fakes satisfy it without inheriting from the real
+    (network-backed) `ipumspy.IpumsApiClient`.
+    """
+
+    def submit_extract(self, extract: MicrodataExtract) -> None: ...
+
+    def wait_for_extract(self, extract: MicrodataExtract) -> None: ...
+
+    def download_extract(
+        self, extract: MicrodataExtract, download_dir: Path
+    ) -> None: ...
+
+
 class IPUMSExtractor(Extractor):
     """Downloads microdata extracts from the IPUMS API and persists them as-is."""
 
@@ -296,7 +312,7 @@ class IPUMSExtractor(Extractor):
         self,
         api_key: str | None = None,
         storage_dir: Path | None = None,
-        client: IpumsApiClient | None = None,
+        client: IpumsClient | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.ipums_api_key
 

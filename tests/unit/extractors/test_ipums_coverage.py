@@ -4,8 +4,7 @@ import pytest
 import structlog.testing
 import yaml
 
-from src.extractors.base import build_extraction_record
-from src.extractors.ipums_coverage import (
+from extractors.ipums.ipums_coverage import (
     CollectionCoverage,
     SampleCoverage,
     build_coverage,
@@ -14,6 +13,7 @@ from src.extractors.ipums_coverage import (
     plan_force_requests,
     save_coverage,
 )
+from src.extractors.base import build_extraction_record
 from src.extractors.manifest import append_to_manifest
 
 
