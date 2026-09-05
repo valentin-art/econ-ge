@@ -9,9 +9,9 @@ from collections.abc import Sequence
 
 import structlog
 
+from extractors.ipums.ipums_api import IPUMSExtractor
 from src.config import sources
 from src.extractors.base import ExtractionRecord
-from src.extractors.ipums_api import IPUMSExtractor
 
 log = structlog.get_logger(__name__)
 

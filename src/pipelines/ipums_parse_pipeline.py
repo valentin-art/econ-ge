@@ -9,13 +9,13 @@ from pathlib import Path
 
 import structlog
 
-from src.config.settings import settings
-from src.extractors.ipums_coverage import parse_sample_year
-from src.extractors.ipums_ddi import (
+from extractors.ipums.ipums_coverage import parse_sample_year
+from extractors.ipums.ipums_ddi import (
     merge_column_names,
     summary_from_metadata,
     try_summarize_ddi,
 )
+from src.config.settings import settings
 from src.extractors.manifest import read_manifest
 from src.parsers.ipums.parser_ipums import (
     bronze_columns_by_year,
@@ -216,7 +216,7 @@ def _resolve_expected(
     return frozenset(expected_columns)
 
 
-def parse_ipums_extracts(
+def parse_ipums_extracts(  # noqa: C901
     external_dir: Path,
     bronze_dir: Path,
     collection: str,
