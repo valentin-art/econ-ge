@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.extractors.bea_api import BEAExtractor
+from extractors.bea.bea_api import BEAExtractor
 from src.extractors.manifest import read_manifest
 
 
@@ -47,7 +47,7 @@ def test_extract_writes_json_and_manifest_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "src.extractors.bea_api.beaapi.api_request",
+        "src.extractors.bea.bea_api.beaapi.api_request",
         lambda *args, **kwargs: _fake_raw_json("FAAt201"),
     )
     extractor = BEAExtractor(api_key="fake-key", storage_dir=tmp_path)
@@ -79,7 +79,9 @@ def test_extract_passes_frequency_for_nipa_only(
         calls.append(beaspec)
         return _fake_raw_json("T11400")
 
-    monkeypatch.setattr("src.extractors.bea_api.beaapi.api_request", fake_api_request)
+    monkeypatch.setattr(
+        "src.extractors.bea.bea_api.beaapi.api_request", fake_api_request
+    )
     extractor = BEAExtractor(api_key="fake-key", storage_dir=tmp_path)
 
     extractor.extract(dataset="FixedAssets", table="FAAt201")
@@ -96,7 +98,7 @@ def test_extract_raises_on_bea_api_error(
         {"BEAAPI": {"Error": {"APIErrorDescription": "Invalid table name"}}}
     )
     monkeypatch.setattr(
-        "src.extractors.bea_api.beaapi.api_request",
+        "src.extractors.bea.bea_api.beaapi.api_request",
         lambda *args, **kwargs: error_payload,
     )
     extractor = BEAExtractor(api_key="fake-key", storage_dir=tmp_path)

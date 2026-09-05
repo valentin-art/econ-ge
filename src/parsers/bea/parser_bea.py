@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.extractors.bea_json import read_bea_results
+from extractors.bea.bea_json import read_bea_results
 from src.input_output.parquet import write_parquet
 from src.schemas.bronze.bea_long import validate_bea_long
 

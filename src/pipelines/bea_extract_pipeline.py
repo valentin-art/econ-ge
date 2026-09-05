@@ -10,9 +10,9 @@ rather than re-implementing the per-table extraction loop.
 
 import structlog
 
+from extractors.bea.bea_api import BEAExtractor
 from src.config import sources
 from src.extractors.base import ExtractionRecord
-from src.extractors.bea_api import BEAExtractor
 
 log = structlog.get_logger(__name__)
 

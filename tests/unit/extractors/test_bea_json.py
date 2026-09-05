@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.extractors.bea_json import read_bea_results
+from extractors.bea.bea_json import read_bea_results
 
 
 def _write_json(tmp_path: Path, payload: dict) -> Path:

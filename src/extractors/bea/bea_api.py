@@ -15,13 +15,13 @@ import beaapi
 import pandas as pd
 import structlog
 
+from extractors.bea.bea_json import read_bea_results
 from src.config.settings import settings
 from src.extractors.base import (
     ExtractionRecord,
     Extractor,
     build_extraction_record,
 )
-from src.extractors.bea_json import read_bea_results
 from src.extractors.manifest import append_to_manifest
 
 log = structlog.get_logger(__name__)
